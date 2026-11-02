@@ -1,0 +1,13 @@
+# Add to ~/.config/openshell/gateway.toml of the installed gateway.
+# Only these keys are needed on the gateway side; Firecracker settings are
+# passed to the driver through firecracker-driver.env.
+
+[openshell]
+version = 2
+
+[openshell.gateway]
+compute_driver = "firecracker"
+
+[openshell.drivers.firecracker]
+# Must match the socket the driver binds (see the unit's --bind-socket).
+socket_path = "/run/user/1000/openshell-firecracker/driver.sock"
