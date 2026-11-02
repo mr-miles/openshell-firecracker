@@ -1,0 +1,58 @@
+# Kernel config fragment for Firecracker sandbox guests.
+#
+# Apply on top of Firecracker's microvm-kernel CI config for the same Linux
+# version (resources/guest_configs in the Firecracker repository), then merge
+# the sandbox enforcement options OpenShell requires
+# (crates/openshell-driver-vm/runtime/kernel/openshell.kconfig in the OpenShell
+# repository: Landlock, seccomp, cgroups, hardening). Build an uncompressed
+# `vmlinux` (x86_64) or `Image` (aarch64) and point
+# OPENSHELL_VM_FIRECRACKER_KERNEL at it.
+#
+# Firecracker exposes devices over virtio-mmio, not PCI, and the guest has no
+# network device. Every symbol below must be built in (=y): the guest boots
+# without an initramfs or loadable modules.
+
+# Root, overlay and image disks (/dev/vda, /dev/vdb, /dev/vdc).
+CONFIG_BLOCK=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_EXT4_FS=y
+CONFIG_OVERLAY_FS=y
+
+# Host channel: openshell-sandbox connects to the host supervisor over vsock.
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS=y
+
+# Entropy from the virtio-rng device Firecracker attaches.
+CONFIG_HW_RANDOM=y
+CONFIG_HW_RANDOM_VIRTIO=y
+
+# Serial console, which the launcher captures into the sandbox console log.
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_TTY=y
+
+# The guest init is a `#!/bin/bash` script that execs ELF binaries. Without
+# these the kernel cannot start PID 1.
+CONFIG_BINFMT_ELF=y
+CONFIG_BINFMT_SCRIPT=y
+
+# Loopback and unix sockets for the capability-free sandbox. The guest still
+# has no network device; vsock is the only host channel.
+CONFIG_NET=y
+CONFIG_UNIX=y
+CONFIG_INET=y
+
+# Guest init mounts these before switching to the overlay root.
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_TMPFS=y
+CONFIG_DEVTMPFS=y
+
+# Firecracker 1.10 ACPI tables leave virtio IRQs unrouted on Linux 6.12.
+# CONFIG_ACPI is not set
+
+# No network device is ever attached.
+# CONFIG_VIRTIO_NET is not set

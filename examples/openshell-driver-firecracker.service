@@ -1,14 +1,20 @@
-# User unit for the Firecracker compute driver plugin.
+# User unit that runs the STOCK OpenShell VM driver as an external compute
+# driver, with the Firecracker plugin as its VM launcher.
+#
 # Install to ~/.config/systemd/user/ and run:
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now openshell-driver-firecracker.service
 #
 # It must run as the same user as openshell-gateway.service. The socket lives in
-# a dedicated runtime directory the driver can own; do not move it to /tmp,
-# which the packaged gateway unit hides with PrivateTmp=true.
+# a dedicated runtime directory the driver owns; do not move it to /tmp, which
+# the packaged gateway unit hides with PrivateTmp=true.
+#
+# The driver binary must support OPENSHELL_VM_LAUNCHER_BIN. Until your OpenShell
+# release has it, install the interim driver (interim-driver/README.md) at the path
+# below; afterwards point this at the packaged openshell-driver-vm instead.
 
 [Unit]
-Description=OpenShell Firecracker compute driver
+Description=OpenShell VM compute driver (Firecracker launcher)
 Before=openshell-gateway.service
 
 [Service]
@@ -16,6 +22,7 @@ Type=simple
 EnvironmentFile=%E/openshell/firecracker-driver.env
 RuntimeDirectory=openshell-firecracker
 RuntimeDirectoryMode=0700
+ExecStartPre=/usr/local/libexec/openshell-firecracker/openshell-firecracker-launcher check
 ExecStart=/usr/local/libexec/openshell-firecracker/openshell-driver-vm \
     --bind-socket %t/openshell-firecracker/driver.sock \
     --allow-same-uid-peer

@@ -1,0 +1,34 @@
+# INTERIM: delete this whole directory once the upstream launcher override
+# (OPENSHELL_VM_LAUNCHER_BIN) ships in the OpenShell release you run. See README.md.
+
+# Marks this package as its own workspace root, so it never joins the plugin's.
+[workspace]
+
+[package]
+name = "openshell-driver-vm-interim"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+description = "Interim copy of the OpenShell VM driver entry point with a launcher override"
+publish = false
+
+[[bin]]
+name = "openshell-driver-vm-interim"
+path = "src/main.rs"
+
+# The OpenShell crates are used unmodified, pinned to the latest OpenShell release.
+# The release workflow rewrites these three tags to whatever the latest release is
+# when it builds, so keep exactly three `tag = "..."` entries here. The driver's
+# embedded host supervisor and guest runtime must speak your gateway's protocol.
+[dependencies]
+openshell-driver-vm = { git = "https://github.com/NVIDIA/OpenShell", tag = "v0.1.6" }
+openshell-core = { git = "https://github.com/NVIDIA/OpenShell", tag = "v0.1.6", default-features = false, features = ["clap"] }
+openshell-otel = { git = "https://github.com/NVIDIA/OpenShell", tag = "v0.1.6" }
+
+clap = { version = "4.5", features = ["derive", "env"] }
+futures = "0.3"
+miette = { version = "7", features = ["fancy"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tonic = { version = "0.14", features = ["transport"] }
+tracing = "0.1"

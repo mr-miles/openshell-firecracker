@@ -1,0 +1,31 @@
+# Cargo build output (the plugin and the interim driver are separate packages).
+# Cargo.lock is kept: both build binaries.
+/target
+/interim-driver/target
+
+# Release staging (release.yml builds these in CI; a local run may leave them).
+/dist
+/assets
+
+# Real configuration and secrets. Only the examples are tracked.
+*.env
+!/examples/*.env
+*.pem
+*.key
+
+# Files install.sh writes beside ones you have edited.
+*.new
+
+# Guest kernel build output and local VM state.
+/linux-*
+vmlinux
+*.ext4
+*.log
+
+# Editors and OS.
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,153 @@
+# Builds the release assets install.sh downloads, and publishes them.
+#
+#   openshell-firecracker-launcher-<arch>-linux.tar.gz   the launcher
+#   openshell-driver-vm-interim-<arch>-linux.tar.gz      INTERIM driver, built against the
+#                                                        latest OpenShell release
+#   openshell-version.txt                                which OpenShell release that is
+#   examples.tar.gz, install.sh, SHA256SUMS
+#
+# Push a tag such as v0.1.0 to publish. workflow_dispatch builds the assets
+# without publishing, to check the build.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.95.0"
+  ARCH: x86_64
+
+jobs:
+  launcher:
+    name: Launcher
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -czf "dist/openshell-firecracker-launcher-${ARCH}-linux.tar.gz" \
+            -C target/release openshell-firecracker-launcher
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher
+          path: dist/*
+          if-no-files-found: error
+
+  # INTERIM: delete the two jobs below with the interim-driver/ directory once the
+  # upstream launcher override ships (see interim-driver/README.md).
+  openshell:
+    name: Latest OpenShell release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.latest.outputs.tag }}
+    steps:
+      - id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The latest stable (non-prerelease) release.
+          tag="$(gh api repos/NVIDIA/OpenShell/releases/latest --jq .tag_name)"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.+][A-Za-z0-9.]+)?$ ]] || { echo "unexpected tag: $tag"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Building against OpenShell $tag"
+
+  driver:
+    name: Interim driver (OpenShell ${{ needs.openshell.outputs.tag }})
+    needs: openshell
+    runs-on: ubuntu-latest
+    env:
+      OPENSHELL_TAG: ${{ needs.openshell.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out OpenShell ${{ needs.openshell.outputs.tag }}
+        uses: actions/checkout@v4
+        with:
+          repository: NVIDIA/OpenShell
+          ref: ${{ needs.openshell.outputs.tag }}
+          path: openshell
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add "${ARCH}-unknown-linux-musl"
+      - name: Install mise
+        run: |
+          curl -fsSL https://mise.run | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # Stage the runtime artifacts the driver embeds (host supervisor, guest
+      # sandbox and init, umoci, libkrun). OpenShell's own tasks do this.
+      - name: Stage OpenShell runtime artifacts
+        working-directory: openshell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mise install
+          mise run vm:setup
+          mise run vm:supervisor
+      - name: Pin the driver to this OpenShell release
+        working-directory: interim-driver
+        run: |
+          sed -i -E 's/(rev|tag) = "[^"]*"/tag = "'"$OPENSHELL_TAG"'"/' Cargo.toml
+          test "$(grep -c "tag = \"$OPENSHELL_TAG\"" Cargo.toml)" = 3
+      - name: Build
+        working-directory: interim-driver
+        env:
+          OPENSHELL_VM_RUNTIME_COMPRESSED_DIR: ${{ github.workspace }}/openshell/target/vm-runtime-compressed
+        run: cargo build --release
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -czf "dist/openshell-driver-vm-interim-${ARCH}-linux.tar.gz" \
+            -C interim-driver/target/release openshell-driver-vm-interim
+          printf '%s\n' "$OPENSHELL_TAG" > dist/openshell-version.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: driver
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [launcher, driver]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Add the installer and examples
+        run: |
+          # The installer carries the repository it downloads from.
+          sed "s|@REPO@|${GITHUB_REPOSITORY}|" install.sh > assets/install.sh
+          chmod +x assets/install.sh
+          tar -czf assets/examples.tar.gz examples
+      - name: Checksums
+        working-directory: assets
+        run: sha256sum -- * | grep -v ' SHA256SUMS$' > SHA256SUMS && cat SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" assets/* \
+              --title "$GITHUB_REF_NAME" --generate-notes
+          fi

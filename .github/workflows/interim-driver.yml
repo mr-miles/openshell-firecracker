@@ -1,0 +1,55 @@
+# INTERIM: delete this file together with the interim-driver/ directory once the
+# upstream launcher override ships (see interim-driver/README.md).
+name: Interim driver
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "interim-driver/**"
+      - ".github/workflows/interim-driver.yml"
+  pull_request:
+    paths:
+      - "interim-driver/**"
+      - ".github/workflows/interim-driver.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.95.0"
+
+defaults:
+  run:
+    working-directory: interim-driver
+
+jobs:
+  check:
+    name: Format, lint, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
+            --component rustfmt --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            interim-driver/target
+          key: interim-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('interim-driver/Cargo.toml', 'interim-driver/Cargo.lock') }}
+          restore-keys: interim-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-
+      - name: rustfmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test --all-targets
+      # Without OPENSHELL_VM_RUNTIME_COMPRESSED_DIR the OpenShell build script embeds
+      # empty stubs: this proves the crate compiles and links, not that VMs boot.
+      - name: Build
+        run: cargo build --release
