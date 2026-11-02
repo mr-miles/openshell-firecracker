@@ -29,19 +29,20 @@ if grep -q 'OPENSHELL_VM_LAUNCHER_BIN' "$file"; then
     exit 0
 fi
 
-struct_anchor='^struct Args \{$'
-none_anchor='^        launcher_bin: None,$'
+# Whole-line, fixed-string matches: `{` is special in some regex dialects.
+struct_anchor='struct Args {'
+none_anchor='        launcher_bin: None,'
 
-n="$(grep -c -- "$struct_anchor" "$file" || true)"
-[ "$n" = 1 ] || die "expected exactly one 'struct Args {' in $file, found $n"
-n="$(grep -c -- "$none_anchor" "$file" || true)"
-[ "$n" = 1 ] || die "expected exactly one '        launcher_bin: None,' in $file, found $n"
+n="$(grep -cxF -- "$struct_anchor" "$file" || true)"
+[ "$n" = 1 ] || die "expected exactly one '$struct_anchor' in $file, found $n"
+n="$(grep -cxF -- "$none_anchor" "$file" || true)"
+[ "$n" = 1 ] || die "expected exactly one '$none_anchor' in $file, found $n"
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
 awk '
-    /^struct Args \{$/ {
+    $0 == "struct Args {" {
         print
         print "    /// VM launcher executable the driver runs for every VM. Defaults to this"
         print "    /// binary. The launcher receives the driver'"'"'s `--internal-run-vm` flags."
@@ -50,7 +51,7 @@ awk '
         print ""
         next
     }
-    /^        launcher_bin: None,$/ {
+    $0 == "        launcher_bin: None," {
         print "        launcher_bin: args.launcher_bin.clone(),"
         next
     }
