@@ -28,7 +28,7 @@ jobs:
     name: Launcher
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
@@ -40,7 +40,7 @@ jobs:
           mkdir -p dist
           tar -czf "dist/openshell-firecracker-launcher-${ARCH}-linux.tar.gz" \
             -C target/release openshell-firecracker-launcher
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: launcher
           path: dist/*
@@ -71,9 +71,9 @@ jobs:
     env:
       OPENSHELL_TAG: ${{ needs.openshell.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check out OpenShell ${{ needs.openshell.outputs.tag }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: NVIDIA/OpenShell
           ref: ${{ needs.openshell.outputs.tag }}
@@ -113,7 +113,7 @@ jobs:
           tar -czf "dist/openshell-driver-vm-interim-${ARCH}-linux.tar.gz" \
             -C interim-driver/target/release openshell-driver-vm-interim
           printf '%s\n' "$OPENSHELL_TAG" > dist/openshell-version.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: driver
           path: dist/*
@@ -127,8 +127,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: assets
           merge-multiple: true
