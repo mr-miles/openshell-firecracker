@@ -65,7 +65,11 @@ fn plain_path(path: &Path) -> Result<&str, String> {
     let text = path
         .to_str()
         .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))?;
-    if text.is_empty() || text.chars().any(|c| c.is_whitespace() || c == '"' || c == '\'') {
+    if text.is_empty()
+        || text
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\'')
+    {
         return Err(format!(
             "path must not contain whitespace or quotes: {}",
             path.display()

@@ -153,7 +153,10 @@ pub fn preflight(firecracker: &Path, kernel: &Path) -> Result<(), String> {
         ));
     }
     if mode(kernel)? & 0o004 == 0 {
-        return Err(format!("{} must be readable by all users", kernel.display()));
+        return Err(format!(
+            "{} must be readable by all users",
+            kernel.display()
+        ));
     }
     if mode(Path::new("/dev/kvm"))? & 0o006 != 0o006 {
         return Err("/dev/kvm must be readable and writable by all users".to_string());
@@ -238,7 +241,9 @@ pub fn map(ids: &SubIds, pid: u32, offset: u32) -> Result<(), String> {
             }
             Ok(_) => {}
             Err(error) => {
-                return Err(format!("the VMM exited before its ids were mapped: {error}"));
+                return Err(format!(
+                    "the VMM exited before its ids were mapped: {error}"
+                ));
             }
         }
         std::thread::sleep(Duration::from_millis(5));

@@ -130,7 +130,10 @@ impl JailSpec {
                 ));
             }
             if bind.access == Access::Device && !path.starts_with("/dev/") {
-                return Err(format!("jail device must be under /dev: {}", path.display()));
+                return Err(format!(
+                    "jail device must be under /dev: {}",
+                    path.display()
+                ));
             }
             if path.starts_with(&root) || root.starts_with(path) {
                 return Err(format!(
@@ -561,7 +564,10 @@ mod tests {
         assert!(!off.sub);
         assert!(!spec().to_args().iter().any(|arg| arg == "--sub"));
 
-        let on = JailSpec { sub: true, ..spec() };
+        let on = JailSpec {
+            sub: true,
+            ..spec()
+        };
         let args = on.to_args();
         assert!(args.iter().any(|arg| arg == "--sub"));
         let parsed = JailSpec::parse(&args[1..]).unwrap();

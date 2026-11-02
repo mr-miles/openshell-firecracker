@@ -40,8 +40,6 @@ pub fn exec_stock(argv: &[OsString]) -> String {
         Ok(driver) => driver,
         Err(error) => return error,
     };
-    let error = Command::new(&driver)
-        .args(argv.iter().skip(1))
-        .exec();
+    let error = Command::new(&driver).args(argv.iter().skip(1)).exec();
     format!("exec {}: {error}", driver.display())
 }

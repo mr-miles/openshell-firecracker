@@ -156,7 +156,10 @@ impl ConsolePump {
         }
         if let Ok(mut guard) = self.shared.lock() {
             let tail = guard.retention.finish();
-            let _ = guard.file.write_all(&tail).and_then(|()| guard.file.flush());
+            let _ = guard
+                .file
+                .write_all(&tail)
+                .and_then(|()| guard.file.flush());
         }
     }
 }
@@ -205,8 +208,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("console.log");
         let data: Vec<u8> = (0..40u8).collect();
-        let streams: Vec<Box<dyn Read + Send>> =
-            vec![Box::new(std::io::Cursor::new(data.clone()))];
+        let streams: Vec<Box<dyn Read + Send>> = vec![Box::new(std::io::Cursor::new(data.clone()))];
         let pump = pump_with(streams, &path, 10, 5).unwrap();
         pump.finish();
         let log = std::fs::read(&path).unwrap();

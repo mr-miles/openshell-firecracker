@@ -90,7 +90,9 @@ pub fn run_checks(host: &Result<HostConfig, String>, launcher: &Path) -> Vec<Fin
         if tool_present(tool) {
             findings.push(Finding::Ok(format!("{tool} is installed")));
         } else {
-            findings.push(Finding::Fail(format!("{tool} is missing (package e2fsprogs)")));
+            findings.push(Finding::Fail(format!(
+                "{tool} is missing (package e2fsprogs)"
+            )));
         }
     }
 
@@ -99,9 +101,9 @@ pub fn run_checks(host: &Result<HostConfig, String>, launcher: &Path) -> Vec<Fin
             SubuidMode::Off => Finding::Ok("sub-uid isolation is off".to_string()),
             mode => match subids::preflight(&host.firecracker, &host.kernel) {
                 Ok(()) => Finding::Ok("sub-uid isolation is available".to_string()),
-                Err(error) if mode == SubuidMode::Required => {
-                    Finding::Fail(format!("sub-uid isolation is required but unavailable: {error}"))
-                }
+                Err(error) if mode == SubuidMode::Required => Finding::Fail(format!(
+                    "sub-uid isolation is required but unavailable: {error}"
+                )),
                 Err(error) => Finding::Warn(format!(
                     "sub-uid isolation unavailable; VMMs will run as the driver user: {error}"
                 )),
@@ -144,7 +146,11 @@ mod tests {
             &Err("OPENSHELL_VM_FIRECRACKER_BIN is not set".to_string()),
             Path::new("/nonexistent/launcher"),
         );
-        assert!(findings.iter().any(|f| matches!(f, Finding::Fail(text) if text.contains("is not set"))));
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, Finding::Fail(text) if text.contains("is not set")))
+        );
         assert!(findings.iter().any(|f| matches!(f, Finding::Fail(_))));
     }
 }

@@ -272,7 +272,10 @@ mod tests {
             parse_firecracker_version("Firecracker v1.13.0-dev"),
             Some((1, 13, 0))
         );
-        assert_eq!(parse_firecracker_version("Firecracker v1.4"), Some((1, 4, 0)));
+        assert_eq!(
+            parse_firecracker_version("Firecracker v1.4"),
+            Some((1, 4, 0))
+        );
         assert_eq!(parse_firecracker_version("not firecracker"), None);
         assert_eq!(parse_firecracker_version("version vX.Y"), None);
         assert!(parse_firecracker_version("Firecracker v1.3.3").unwrap() < MIN_FIRECRACKER_VERSION);

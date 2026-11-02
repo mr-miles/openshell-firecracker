@@ -98,6 +98,10 @@ mod tests {
     fn exit_statuses_read_as_results() {
         assert!(describe_exit(0).is_ok(), "exited 0");
         assert!(describe_exit(3 << 8).unwrap_err().contains("status 3"));
-        assert!(describe_exit(libc::SIGKILL).unwrap_err().contains("signal 9"));
+        assert!(
+            describe_exit(libc::SIGKILL)
+                .unwrap_err()
+                .contains("signal 9")
+        );
     }
 }

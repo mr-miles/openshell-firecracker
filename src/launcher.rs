@@ -52,9 +52,7 @@ pub struct HostConfig {
 }
 
 fn env_file(name: &str) -> Result<PathBuf, String> {
-    let path = PathBuf::from(
-        std::env::var_os(name).ok_or_else(|| format!("{name} is not set"))?,
-    );
+    let path = PathBuf::from(std::env::var_os(name).ok_or_else(|| format!("{name} is not set"))?);
     if !path.is_absolute() || !path.is_file() {
         return Err(format!(
             "{name} must be an absolute path to an existing file: {}",
@@ -234,7 +232,9 @@ fn check_kvm_access() -> Result<(), String> {
         .open("/dev/kvm")
         .map(|_| ())
         .map_err(|error| {
-            format!("cannot open /dev/kvm read/write: {error}\nKVM access is required to run microVMs.")
+            format!(
+                "cannot open /dev/kvm read/write: {error}\nKVM access is required to run microVMs."
+            )
         })
 }
 
@@ -296,10 +296,9 @@ pub fn run(args: &LauncherArgs) -> Result<(), String> {
         let dir = SocketDir::create()?;
         let listener = UnixListener::bind(dir.path.join(bridge_socket_name(port)))
             .map_err(|error| format!("bind vsock bridge: {error}"))?;
-        set_mode(
-            &dir.path.join(bridge_socket_name(port)),
-            |_| if sub.is_some() { 0o660 } else { 0o600 },
-        )?;
+        set_mode(&dir.path.join(bridge_socket_name(port)), |_| {
+            if sub.is_some() { 0o660 } else { 0o600 }
+        })?;
         bridge::serve(listener, target.clone());
         vsock_uds = Some(dir.path.join(VSOCK_UDS_NAME));
         socket_dir = Some(dir);
@@ -428,9 +427,11 @@ mod tests {
             std::env::set_var(ENV_SUBUIDS, "off");
         }
         assert_eq!(HostConfig::from_env().unwrap().subuids, SubuidMode::Off);
-        assert!(resolve_subuid(&HostConfig::from_env().unwrap())
-            .unwrap()
-            .is_none());
+        assert!(
+            resolve_subuid(&HostConfig::from_env().unwrap())
+                .unwrap()
+                .is_none()
+        );
 
         unsafe {
             std::env::set_var(ENV_SUBUIDS, "sometimes");
@@ -459,9 +460,11 @@ mod tests {
     #[test]
     fn required_flags_are_named_in_errors() {
         let none: Option<PathBuf> = None;
-        assert!(required(&none, "--vm-root-disk")
-            .unwrap_err()
-            .contains("--vm-root-disk"));
+        assert!(
+            required(&none, "--vm-root-disk")
+                .unwrap_err()
+                .contains("--vm-root-disk")
+        );
         let some = Some(PathBuf::from("/x"));
         assert_eq!(required(&some, "--f").unwrap(), &PathBuf::from("/x"));
     }
