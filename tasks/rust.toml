@@ -1,0 +1,26 @@
+# Rust format, lint, test and build tasks for the plugin.
+# The interim driver is a separate package: see interim.toml.
+
+["rust:format"]
+description = "Format the plugin"
+run = "cargo fmt --all"
+
+["rust:format:check"]
+description = "Check the plugin's formatting"
+run = "cargo fmt --all -- --check"
+
+["rust:lint"]
+description = "Lint the plugin with Clippy (deny warnings)"
+run = "cargo clippy --all-targets -- -D warnings"
+
+["rust:test"]
+description = "Run the plugin's unit tests (no KVM needed)"
+run = "cargo test --all-targets"
+
+["rust:build"]
+description = "Build the launcher in release mode"
+run = "cargo build --release"
+
+["ci"]
+description = "Everything CI checks for the plugin: format, lint, test"
+depends = ["rust:format:check", "rust:lint", "rust:test"]

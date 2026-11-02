@@ -1,0 +1,23 @@
+# Plugin mise configuration. See https://mise.jdx.dev/
+#
+# Tasks are defined in tasks/*.toml: run `mise tasks` to list them. CI runs the
+# same tasks (`mise run ci`, `mise run package:launcher`, ...), so a local run
+# and a workflow run do the same thing.
+
+min_version = { soft = "2026.9.9" }
+
+redactions = ["*_TOKEN", "*_PASSWORD"]
+
+[settings]
+experimental = true
+
+# `mise install` writes mise.lock on first use: commit it.
+lockfile = true
+lockfile_platforms = ["linux-x64", "linux-arm64"]
+
+[tools]
+# Keep in sync with rust-toolchain.toml.
+rust = { version = "1.95.0", profile = "minimal", components = "rustfmt,clippy" }
+
+[task_config]
+includes = ["tasks/*.toml"]

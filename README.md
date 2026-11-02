@@ -46,11 +46,12 @@ its own executable. [`upstream/launcher-override.md`](upstream/launcher-override
 the two-line change that adds `OPENSHELL_VM_LAUNCHER_BIN`, with the reasoning sent
 upstream.
 
-**Interim driver.** Until a release contains that option, [`interim-driver/`](interim-driver/)
-builds a driver that has it: a copy of the VM driver's entry point with the one change,
-linking OpenShell's own crates unmodified. It is isolated from the rest of the plugin and
-is removed by deleting that directory and its workflow; see its README. Everything else is
-in the rest of this repository.
+**Interim driver.** Until a release contains that option, [`interim/`](interim/) builds
+OpenShell's own VM driver with a small patch that adds it. Nothing of OpenShell's is copied
+here: the patch is applied to a checkout of the release at build time, by anchor, so it
+matches whichever release is checked out. It is isolated from the rest of the plugin and is
+removed by deleting that directory and its task file and workflow; see its README.
+Everything else is in the rest of this repository.
 
 ## Requirements
 
@@ -97,18 +98,16 @@ architecture.
      /usr/local/libexec/openshell-firecracker/openshell-firecracker-launcher
    ```
 
-2. **Build the interim driver** ([`interim-driver/`](interim-driver/README.md)) from your
-   release. The driver must come from the same release as the gateway: its embedded host
-   supervisor and guest runtime have to speak the gateway's protocol. Set the `rev` in
-   `interim-driver/Cargo.toml` to your release's commit or tag, stage the runtime artifacts
-   in an OpenShell checkout of that tag, then:
+2. **Build the interim driver** ([`interim/`](interim/README.md)) from your release. The
+   driver must come from the same release as the gateway: its embedded host supervisor and
+   guest runtime have to speak the gateway's protocol. This needs `mise`, `gh` and `git`;
+   it checks out that release, patches it, stages its runtime artifacts and builds:
 
    ```shell
    openshell-gateway --version                 # e.g. 0.1.6
-   cd interim-driver
-   OPENSHELL_VM_RUNTIME_COMPRESSED_DIR=<openshell>/target/vm-runtime-compressed \
-     cargo build --release
-   sudo install -D target/release/openshell-driver-vm-interim \
+   OPENSHELL_TAG=v0.1.6 mise run interim:package
+   tar -xzf dist/openshell-driver-vm-interim-$(uname -m)-linux.tar.gz -C dist
+   sudo install -D dist/openshell-driver-vm-interim \
      /usr/local/libexec/openshell-firecracker/openshell-driver-vm
    ```
 
@@ -283,7 +282,7 @@ first sandbox. If that happens, set `off` to confirm the cause and read
 | `cargo clippy` / `rustfmt`, CI workflow | Written; CI has not run |
 | Jail on a real host (`unshare`, `pivot_root`, mount flags, PID namespace, sub-uid mapping) | Not run |
 | Boot of a real VM, vsock handshake through the bridge, guest clock | Not run (no KVM available when written) |
-| Stock driver accepting `OPENSHELL_VM_LAUNCHER_BIN` | Not implemented upstream (issue filed). `interim-driver/` provides it meanwhile; it is a copy of the driver's entry point written without compiling it |
+| Stock driver accepting `OPENSHELL_VM_LAUNCHER_BIN` | Not implemented upstream (issue filed). `interim/` patches it into OpenShell's driver at build time; the patch has a fixture test but has never been applied to a real release checkout |
 | Whether the image-preparation worker is started through the launcher | Not checked; the plugin hands it to the stock driver either way |
 | Conformance suite | Not run |
 
@@ -309,12 +308,21 @@ supervisor control socket, and the external-driver registration keys (`compute_d
 
 ## Development
 
+The toolchain and tasks are managed with [mise](https://mise.jdx.dev/), as in OpenShell.
+`mise install` installs the pinned Rust (1.95.0, with rustfmt and clippy) and writes
+`mise.lock`; commit that file. `mise tasks` lists everything.
+
 ```shell
-cargo fmt --all
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
+mise run rust:format          # cargo fmt --all
+mise run ci                   # format check, clippy (deny warnings), tests
+mise run package:launcher     # release build, packaged into dist/
 ```
 
-CI (`.github/workflows/ci.yml`) runs rustfmt, clippy with warnings denied, the unit tests,
-and a release build on every push and pull request. The tests need no KVM; the one that
+CI runs the same tasks, so a local run and a workflow run do the same thing.
+`.github/workflows/ci.yml` runs `rust:format:check`, `rust:lint` and `rust:test` on every
+push and pull request, then builds the launcher. The tests need no KVM; the one that
 writes into an ext4 image skips itself when `e2fsprogs` is missing.
+
+The interim driver has `interim:*` tasks in `tasks/interim.toml`: `interim:ci` tests the
+patch, and `interim:package` builds and packages the driver. Releases are built by `.github/workflows/release.yml` when a `v*` tag
+is pushed; it calls `package:launcher`, `interim:package` and `package:assets`.

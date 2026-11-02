@@ -1,0 +1,80 @@
+# INTERIM: delete this file together with the interim/ directory once the upstream
+# launcher override ships (see interim/README.md).
+#
+# Builds OpenShell's own VM driver from the latest release, with a two-line patch
+# that adds OPENSHELL_VM_LAUNCHER_BIN. Nothing of OpenShell's is copied here: the
+# patch is applied to a checkout of the release at build time, so it always matches.
+
+["interim:test"]
+description = "Test the launcher-override patch against a fixture (needs only bash)"
+run = "bash interim/test.sh"
+
+["interim:ci"]
+description = "Everything CI checks for the interim driver"
+depends = ["interim:test"]
+
+["interim:version"]
+description = "Resolve the OpenShell release to build against: OPENSHELL_TAG, else the latest stable (needs gh)"
+run = '''
+set -eu
+tag="${OPENSHELL_TAG:-$(gh api repos/NVIDIA/OpenShell/releases/latest --jq .tag_name)}"
+case "$tag" in
+  v[0-9]*) ;;
+  *) echo "unexpected OpenShell tag: $tag" >&2; exit 1 ;;
+esac
+mkdir -p dist
+printf '%s\n' "$tag" > dist/openshell-version.txt
+echo "building against OpenShell $tag"
+'''
+
+["interim:checkout"]
+description = "Check out that OpenShell release (into OPENSHELL_DIR, default ./openshell)"
+depends = ["interim:version"]
+run = '''
+set -eu
+dir="${OPENSHELL_DIR:-openshell}"
+tag="$(cat dist/openshell-version.txt)"
+if [ ! -d "$dir/.git" ]; then
+  git clone --depth 1 --branch "$tag" https://github.com/NVIDIA/OpenShell "$dir"
+fi
+'''
+
+["interim:patch"]
+description = "Add OPENSHELL_VM_LAUNCHER_BIN to the checkout's VM driver"
+depends = ["interim:checkout"]
+run = '''
+set -eu
+dir="${OPENSHELL_DIR:-openshell}"
+bash interim/apply-launcher-override.sh "$dir/crates/openshell-driver-vm/src/main.rs"
+'''
+
+["interim:runtime"]
+description = "Stage the runtime artifacts the driver embeds, with OpenShell's own tasks"
+depends = ["interim:patch"]
+run = '''
+set -eu
+dir="${OPENSHELL_DIR:-openshell}"
+rustup target add "$(uname -m)-unknown-linux-musl"
+cd "$dir"
+mise trust
+mise install
+mise run vm:setup
+mise run vm:supervisor
+'''
+
+["interim:package"]
+description = "Build the patched VM driver and package it into dist/"
+depends = ["interim:runtime"]
+run = '''
+set -eu
+dir="${OPENSHELL_DIR:-openshell}"
+root="$PWD"
+( cd "$dir" \
+  && OPENSHELL_VM_RUNTIME_COMPRESSED_DIR="$root/$dir/target/vm-runtime-compressed" \
+     mise exec -- cargo build --release -p openshell-driver-vm )
+stage="$(mktemp -d)"
+install -m 0755 "$dir/target/release/openshell-driver-vm" "$stage/openshell-driver-vm-interim"
+mkdir -p dist
+tar -czf "dist/openshell-driver-vm-interim-$(uname -m)-linux.tar.gz" -C "$stage" openshell-driver-vm-interim
+rm -rf "$stage"
+'''
