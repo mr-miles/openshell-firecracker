@@ -118,7 +118,7 @@ pub fn locate(search: &Search<'_>) -> Result<Found, String> {
         .join(", ");
     Err(match search.env_name {
         Some(name) => format!(
-            "{name} is not set and {} was not found (looked in: {looked})",
+            "{} was not found (looked in: {looked}); set {name} to use another location",
             search.file_name
         ),
         None => format!("{} was not found (looked in: {looked})", search.file_name),
@@ -198,8 +198,13 @@ mod tests {
         let chosen = touch(dir.path(), "chosen");
         let beside = tempfile::tempdir().unwrap();
         touch(beside.path(), "firecracker");
-        let found = locate(&search(Some(chosen.as_os_str()), Some(beside.path()), None, &[]))
-            .unwrap();
+        let found = locate(&search(
+            Some(chosen.as_os_str()),
+            Some(beside.path()),
+            None,
+            &[],
+        ))
+        .unwrap();
         assert_eq!(found.path, chosen);
         assert_eq!(found.source, Source::Env("FC_TEST"));
     }
@@ -224,7 +229,13 @@ mod tests {
     fn an_empty_variable_counts_as_unset() {
         let beside = tempfile::tempdir().unwrap();
         let expected = touch(beside.path(), "firecracker");
-        let found = locate(&search(Some(OsStr::new("")), Some(beside.path()), None, &[])).unwrap();
+        let found = locate(&search(
+            Some(OsStr::new("")),
+            Some(beside.path()),
+            None,
+            &[],
+        ))
+        .unwrap();
         assert_eq!(found.path, expected);
         assert_eq!(found.source, Source::Default);
     }
@@ -246,7 +257,9 @@ mod tests {
         let expected = touch(on_path.path(), "firecracker");
         let path_var = std::env::join_paths([on_path.path()]).unwrap();
         assert_eq!(
-            locate(&search(None, None, Some(&path_var), &[])).unwrap().path,
+            locate(&search(None, None, Some(&path_var), &[]))
+                .unwrap()
+                .path,
             expected
         );
 
@@ -269,7 +282,11 @@ mod tests {
     fn a_miss_names_the_variable_and_where_it_looked() {
         let empty = tempfile::tempdir().unwrap();
         let error = locate(&search(None, Some(empty.path()), None, &[])).unwrap_err();
-        assert!(error.contains("FC_TEST is not set"), "{error}");
-        assert!(error.contains(&empty.path().display().to_string()), "{error}");
+        assert!(error.contains("firecracker was not found"), "{error}");
+        assert!(error.contains("set FC_TEST"), "{error}");
+        assert!(
+            error.contains(&empty.path().display().to_string()),
+            "{error}"
+        );
     }
 }

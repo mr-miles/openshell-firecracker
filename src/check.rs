@@ -104,7 +104,10 @@ fn check_kernel_file(path: &Path) -> Finding {
     let mut head = Vec::new();
     let read = std::fs::File::open(path).and_then(|file| file.take(0x400).read_to_end(&mut head));
     if let Err(error) = read {
-        return Finding::Fail(format!("cannot read the guest kernel {}: {error}", path.display()));
+        return Finding::Fail(format!(
+            "cannot read the guest kernel {}: {error}",
+            path.display()
+        ));
     }
     let wants_elf = cfg!(target_arch = "x86_64");
     match (kernel_kind(&head), wants_elf) {
@@ -241,7 +244,10 @@ fn check_openshell(launcher: &Path, out: &mut Vec<Finding>) {
         },
     }
     match find("openshell") {
-        Ok(found) => out.push(Finding::Ok(format!("openshell CLI ({})", found.path.display()))),
+        Ok(found) => out.push(Finding::Ok(format!(
+            "openshell CLI ({})",
+            found.path.display()
+        ))),
         Err(_) => out.push(Finding::Warn(
             "the openshell CLI is not on PATH (needed to create sandboxes, not by the driver)"
                 .to_string(),
@@ -294,7 +300,9 @@ fn check_openshell(launcher: &Path, out: &mut Vec<Finding>) {
                     "{LAUNCHER_ENV} is not an existing file: {value}"
                 )));
             } else if configured.canonicalize().ok() == launcher.canonicalize().ok() {
-                out.push(Finding::Ok(format!("{LAUNCHER_ENV} points at this launcher")));
+                out.push(Finding::Ok(format!(
+                    "{LAUNCHER_ENV} points at this launcher"
+                )));
             } else {
                 out.push(Finding::Warn(format!(
                     "{LAUNCHER_ENV} is {value}, not this launcher ({})",
@@ -359,7 +367,9 @@ fn check_host(launcher: &Path, out: &mut Vec<Finding>) {
         if tool_present(tool) {
             out.push(Finding::Ok(format!("{tool} is installed")));
         } else {
-            out.push(Finding::Fail(format!("{tool} is missing (package e2fsprogs)")));
+            out.push(Finding::Fail(format!(
+                "{tool} is missing (package e2fsprogs)"
+            )));
         }
     }
 
@@ -397,7 +407,9 @@ fn check_driver_environment(out: &mut Vec<Finding>) {
                 .to_string(),
         )),
         Some(endpoint) => {
-            out.push(Finding::Ok(format!("OPENSHELL_GRPC_ENDPOINT is {endpoint}")));
+            out.push(Finding::Ok(format!(
+                "OPENSHELL_GRPC_ENDPOINT is {endpoint}"
+            )));
             if endpoint.starts_with("https://") {
                 match env_text("OPENSHELL_VM_TLS_CA") {
                     None => out.push(Finding::Fail(
@@ -559,7 +571,10 @@ mod tests {
     fn versions_are_read_from_typical_output() {
         assert_eq!(first_version("openshell-gateway 0.1.6"), Some((0, 1, 6)));
         assert_eq!(first_version("v0.1.6-pre.1"), Some((0, 1, 6)));
-        assert_eq!(first_version("openshell 12.34.56 (abc)"), Some((12, 34, 56)));
+        assert_eq!(
+            first_version("openshell 12.34.56 (abc)"),
+            Some((12, 34, 56))
+        );
         assert_eq!(first_version("no version here"), None);
         assert_eq!(first_version("1.2"), None);
     }
@@ -608,9 +623,8 @@ socket_path = "/run/user/1000/openshell-firecracker/driver.sock"
 
     #[test]
     fn keys_in_the_wrong_table_are_ignored() {
-        let scanned = scan_gateway_toml(
-            "[other]\ncompute_driver = \"firecracker\"\nsocket_path = \"/x\"\n",
-        );
+        let scanned =
+            scan_gateway_toml("[other]\ncompute_driver = \"firecracker\"\nsocket_path = \"/x\"\n");
         assert_eq!(scanned, GatewayToml::default());
     }
 
