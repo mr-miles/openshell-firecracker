@@ -14,7 +14,7 @@
 #   ./install.sh --prefix "$HOME/.local"
 set -euo pipefail
 
-REPO="@REPO@"                   # stamped with the repository by the release workflow
+REPO="mr-miles/openshell-firecracker"                   # stamped with the repository by the release workflow
 PLACEHOLDER="@""REPO@"
 TAG="latest"
 PREFIX="/usr/local"
@@ -92,7 +92,17 @@ else
     BASE="https://github.com/$REPO/releases/download/$TAG"
 fi
 LIBEXEC="$PREFIX/libexec/openshell-firecracker"
+# The driver and gateway run as a user service. Under sudo, $HOME is root's, so put
+# the user's files in the home of the user who will run them, owned by them.
+OWNER=""
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+_run_user="${RUN_USER:-${SUDO_USER:-}}"
+if [ "$(id -u)" -eq 0 ] && [ -n "$_run_user" ] && [ "$_run_user" != root ] && id "$_run_user" >/dev/null 2>&1; then
+    OWNER="$_run_user"
+    _home="$(getent passwd "$_run_user" | cut -d: -f6)"
+    [ -n "$_home" ] || die "cannot find the home directory of $_run_user"
+    CONFIG_HOME="$_home/.config"
+fi
 
 LAUNCHER_ASSET="openshell-firecracker-launcher-$ARCH-linux.tar.gz"
 # INTERIM: the driver is built against the latest OpenShell release when the plugin
@@ -279,14 +289,25 @@ warn_if_gateway_differs() {
 # $2.new beside it instead.
 place() {
     local src="$1" dest="$2" mode="$3"
+    local own=()
+    if [ -n "$OWNER" ] && [ "${dest#"$CONFIG_HOME"/}" != "$dest" ]; then
+        # Create missing parents owned by the user, not root.
+        local d="$CONFIG_HOME" part
+        for part in $(dirname "${dest#"$CONFIG_HOME"/}" | tr / ' '); do
+            [ "$part" = . ] && continue
+            d="$d/$part"
+            [ -d "$d" ] || install -d -m 0755 -o "$OWNER" "$d"
+        done
+        own=(-o "$OWNER")
+    fi
     mkdir -p "$(dirname "$dest")"
     if [ ! -e "$dest" ]; then
-        install -m "$mode" "$src" "$dest"
+        install -m "$mode" ${own[@]+"${own[@]}"} "$src" "$dest"
         say "installed $dest"
     elif cmp -s "$src" "$dest"; then
         say "unchanged $dest"
     else
-        install -m "$mode" "$src" "$dest.new"
+        install -m "$mode" ${own[@]+"${own[@]}"} "$src" "$dest.new"
         say "kept your $dest; the new version is $dest.new"
     fi
 }
