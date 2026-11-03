@@ -45,10 +45,29 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
-      # Resolves the latest OpenShell release, checks it out, patches in the launcher
-      # override, stages that release's runtime artifacts (host supervisor, guest
-      # sandbox and init, umoci, libkrun) with OpenShell's own mise tasks, then
-      # builds OpenShell's VM driver and packages it.
+      - name: Resolve the OpenShell release
+        id: openshell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mise run interim:version
+          echo "tag=$(cat dist/openshell-version.txt)" >> "$GITHUB_OUTPUT"
+      # Compiling OpenShell is the slow part (three release builds). Cache its target
+      # directory per release; a new release reuses the dependency builds.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            openshell/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: openshell-${{ steps.openshell.outputs.tag }}-${{ runner.arch }}-${{ hashFiles('interim/**', 'tasks/interim.toml', 'mise.toml') }}
+          restore-keys: |
+            openshell-${{ steps.openshell.outputs.tag }}-${{ runner.arch }}-
+            openshell-v
+      # Checks out that release, patches in the launcher override, stages its runtime
+      # artifacts (host supervisor, guest sandbox and init, umoci, libkrun) with
+      # OpenShell's own scripts, then builds OpenShell's VM driver and packages it.
+      # Only Rust, zig and cargo-zigbuild are installed; not OpenShell's full toolchain.
       - name: Build and package
         env:
           GH_TOKEN: ${{ github.token }}
