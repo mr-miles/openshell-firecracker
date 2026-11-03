@@ -31,9 +31,11 @@ pub const VMM_SOCKET_SUBDIR: &str = "vmm";
 /// Firecracker supports at most this many vCPUs per microVM.
 const MAX_VCPUS: u8 = 32;
 
-/// Oldest Firecracker the generated config supports: the `entropy` device
-/// arrived in 1.4.
-pub const MIN_FIRECRACKER_VERSION: (u32, u32, u32) = (1, 4, 0);
+/// Oldest Firecracker the plugin supports. The generated config needs only 1.4
+/// (the `entropy` device), but the guest kernel the release builds, Linux 6.18, is
+/// validated by Firecracker from 1.16.1 (docs/kernel-policy.md); older Firecrackers
+/// are outside the tested range for it.
+pub const MIN_FIRECRACKER_VERSION: (u32, u32, u32) = (1, 16, 1);
 
 /// Basename of the bridge socket Firecracker connects to for a guest-initiated
 /// vsock port.
@@ -279,6 +281,17 @@ mod tests {
         assert_eq!(parse_firecracker_version("not firecracker"), None);
         assert_eq!(parse_firecracker_version("version vX.Y"), None);
         assert!(parse_firecracker_version("Firecracker v1.3.3").unwrap() < MIN_FIRECRACKER_VERSION);
+    }
+
+    #[test]
+    fn the_minimum_firecracker_is_the_first_to_validate_the_release_kernel() {
+        assert_eq!(MIN_FIRECRACKER_VERSION, (1, 16, 1));
+        let older = parse_firecracker_version("Firecracker v1.16.0").unwrap();
+        let minimum = parse_firecracker_version("Firecracker v1.16.1").unwrap();
+        let newer = parse_firecracker_version("Firecracker v1.17.0").unwrap();
+        assert!(older < MIN_FIRECRACKER_VERSION);
+        assert!(minimum >= MIN_FIRECRACKER_VERSION);
+        assert!(newer >= MIN_FIRECRACKER_VERSION);
     }
 
     #[test]

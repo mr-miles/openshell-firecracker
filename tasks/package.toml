@@ -2,6 +2,7 @@
 #
 # dist/ ends up holding what install.sh downloads:
 #   openshell-firecracker-launcher-<arch>-linux.tar.gz   package:launcher
+#   openshell-firecracker-kernel-<arch>-linux.tar.gz     kernel:package
 #   openshell-driver-vm-interim-<arch>-linux.tar.gz      interim:package (INTERIM)
 #   openshell-version.txt                                interim:version (INTERIM)
 #   install.sh, examples.tar.gz, SHA256SUMS              package:assets

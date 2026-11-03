@@ -10,7 +10,7 @@
 # the packaged gateway unit hides with PrivateTmp=true.
 #
 # The driver binary must support OPENSHELL_VM_LAUNCHER_BIN. Until your OpenShell
-# release has it, install the interim driver (interim-driver/README.md) at the path
+# release has it, install the interim driver (interim/README.md) at the path
 # below; afterwards point this at the packaged openshell-driver-vm instead.
 
 [Unit]

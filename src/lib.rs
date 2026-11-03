@@ -25,5 +25,6 @@ pub mod console;
 pub mod delegate;
 pub mod envfile;
 pub mod launcher;
+pub mod locate;
 pub mod signals;
 pub mod subids;

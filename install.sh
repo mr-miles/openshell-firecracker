@@ -20,7 +20,10 @@ TAG="latest"
 PREFIX="/usr/local"
 DO_BINARIES=1
 DO_CONFIG=1
-DRIVER=1                        # INTERIM: remove with interim-driver/
+DRIVER=1                        # INTERIM: remove with interim/
+KERNEL=1
+SUBUIDS=1
+RUN_USER=""
 DRY_RUN=0
 
 usage() {
@@ -33,6 +36,15 @@ Usage: install.sh [options]
   --config-only            install the systemd units and env file only (run as your user)
   --launcher-only          do not install the interim driver (use when your OpenShell
                            release has OPENSHELL_VM_LAUNCHER_BIN)
+  --no-kernel              do not install the pre-built guest kernel (you supply your own)
+  --no-subuids             do not set up per-VM uids (see below)
+  --user NAME              the user who will run the driver (default: the user who ran sudo)
+
+Per-VM uids (on by default with --binaries-only, which needs root): so that a VMM that
+escaped its jail holds a uid owning nothing on the host, this gives NAME a range in
+/etc/subuid and /etc/subgid if absent, installs the uidmap package (apt only), and
+installs a udev rule making /dev/kvm world read/write. That last part lets every local
+user use KVM; skip it all with --no-subuids and the plugin runs VMMs as NAME instead.
   --repo OWNER/NAME        GitHub repository to download from (set in release copies)
   --dry-run                print what would happen; download and change nothing
   -h, --help               this help
@@ -42,6 +54,12 @@ EOF
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
 
+# Ubuntu 23.10 and later confine unprivileged user namespaces with AppArmor unless a
+# profile allows the program. The launcher's jail needs them.
+apparmor_restricts_userns() {
+    [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true)" = 1 ]
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --version) TAG="${2:?--version needs a value}"; shift 2 ;;
@@ -49,6 +67,9 @@ while [ $# -gt 0 ]; do
         --binaries-only) DO_CONFIG=0; shift ;;
         --config-only) DO_BINARIES=0; shift ;;
         --launcher-only) DRIVER=0; shift ;;
+        --no-kernel) KERNEL=0; shift ;;
+        --no-subuids) SUBUIDS=0; shift ;;
+        --user) RUN_USER="${2:?--user needs a value}"; shift 2 ;;
         --repo) REPO="${2:?--repo needs a value}"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h | --help) usage; exit 0 ;;
@@ -80,6 +101,11 @@ DRIVER_ASSET=""
 if [ "$DO_BINARIES" -eq 1 ] && [ "$DRIVER" -eq 1 ]; then
     DRIVER_ASSET="openshell-driver-vm-interim-$ARCH-linux.tar.gz"
 fi
+# The guest kernel is built by the release workflow, so nothing here compiles one.
+KERNEL_ASSET=""
+if [ "$DO_BINARIES" -eq 1 ] && [ "$KERNEL" -eq 1 ]; then
+    KERNEL_ASSET="openshell-firecracker-kernel-$ARCH-linux.tar.gz"
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
     say "Dry run: nothing is downloaded or changed."
@@ -87,8 +113,17 @@ if [ "$DRY_RUN" -eq 1 ]; then
     if [ "$DO_BINARIES" -eq 1 ]; then
         say "Download: $BASE/$LAUNCHER_ASSET"
         [ -z "$DRIVER_ASSET" ] || say "Download: $BASE/$DRIVER_ASSET"
+        [ -z "$KERNEL_ASSET" ] || say "Download: $BASE/$KERNEL_ASSET"
         say "Install:  $LIBEXEC/openshell-firecracker-launcher"
         [ -z "$DRIVER_ASSET" ] || say "Install:  $LIBEXEC/openshell-driver-vm"
+        [ -z "$KERNEL_ASSET" ] || say "Install:  $LIBEXEC/vmlinux"
+        if apparmor_restricts_userns; then
+            say "Install:  /etc/apparmor.d/openshell-firecracker-launcher (needs root; this host restricts user namespaces)"
+        fi
+        if [ "$SUBUIDS" -eq 1 ]; then
+            say "Set up:   per-VM uids for ${RUN_USER:-${SUDO_USER:-<use --user>}}: /etc/subuid and /etc/subgid ranges,"
+            say "          the uidmap package (apt), and a udev rule making /dev/kvm world read/write"
+        fi
     fi
     if [ "$DO_CONFIG" -eq 1 ]; then
         say "Download: $BASE/examples.tar.gz"
@@ -119,6 +154,7 @@ install_binaries() {
     mkdir -p "$TMP/bin"
     local assets=("$LAUNCHER_ASSET")
     [ -z "$DRIVER_ASSET" ] || assets+=("$DRIVER_ASSET")
+    [ -z "$KERNEL_ASSET" ] || assets+=("$KERNEL_ASSET")
     local asset
     for asset in "${assets[@]}"; do
         fetch "$asset"
@@ -133,6 +169,95 @@ install_binaries() {
         say "installed $LIBEXEC/openshell-driver-vm"
         warn_if_gateway_differs
     fi
+    if [ -n "$KERNEL_ASSET" ]; then
+        install -m 0644 "$TMP/bin/vmlinux" "$LIBEXEC/vmlinux"
+        say "installed $LIBEXEC/vmlinux"
+    fi
+    install_apparmor_profile
+    [ "$SUBUIDS" -eq 0 ] || setup_subuids
+}
+
+# True if /etc/$1 (subuid or subgid) already gives user $2 a range.
+has_id_range() { grep -q "^$2:" "/etc/$1" 2>/dev/null; }
+
+# Per-VM uids: each VMM runs as a subordinate uid of its own. Needs root. Every
+# step is skipped when already done, and a step that cannot be done says so rather
+# than failing the install: the plugin falls back to running VMMs as the driver's user.
+setup_subuids() {
+    local user="${RUN_USER:-${SUDO_USER:-}}"
+    if [ "$(id -u)" -ne 0 ]; then
+        say "note: per-VM uids need root; re-run with sudo --binaries-only, or pass --no-subuids."
+        return 0
+    fi
+    if [ -z "$user" ] || [ "$user" = root ] || ! id "$user" >/dev/null 2>&1; then
+        say "note: per-VM uids need the user who will run the driver: pass --user NAME (skipped)."
+        return 0
+    fi
+
+    # Ranges of 65536 ids, after every range already allocated.
+    local start file
+    start="$(cat /etc/subuid /etc/subgid 2>/dev/null | awk -F: 'BEGIN { m = 100000 } { e = $2 + $3; if (e > m) m = e } END { print m }')"
+    for file in subuid subgid; do
+        if has_id_range "$file" "$user"; then
+            say "unchanged /etc/$file (already has a range for $user)"
+        else
+            printf '%s:%s:65536\n' "$user" "$start" >> "/etc/$file"
+            say "added a range for $user to /etc/$file ($start, 65536 ids)"
+            start=$((start + 65536))
+        fi
+    done
+
+    if command -v newuidmap >/dev/null 2>&1 && command -v newgidmap >/dev/null 2>&1; then
+        say "unchanged uidmap (newuidmap and newgidmap are installed)"
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y uidmap && say "installed the uidmap package" \
+            || say "warning: could not install uidmap; install the package that provides newuidmap and newgidmap" >&2
+    else
+        say "note: install the package that provides newuidmap and newgidmap (uidmap, or shadow-utils)."
+    fi
+
+    if [ -e /dev/kvm ]; then
+        printf '%s\n' '# Installed by the OpenShell Firecracker plugin: per-VM uids need /dev/kvm usable by' \
+            '# every user. Remove this file to restrict it to the kvm group again.' \
+            'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' > "$TMP/kvm-rule"
+        place "$TMP/kvm-rule" /etc/udev/rules.d/99-openshell-firecracker-kvm.rules 0644
+        say "note: /dev/kvm is now usable by every local user (so VMMs can run as their own uid)."
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules && udevadm trigger --name-match=kvm \
+                || say "warning: could not apply the udev rule now; it applies at the next boot" >&2
+        fi
+    else
+        say "note: /dev/kvm does not exist on this host, so there is no KVM rule to install."
+    fi
+}
+
+# Let the launcher, and only the launcher, create user namespaces on hosts where
+# AppArmor restricts them. Needs root, like the rest of --binaries-only.
+install_apparmor_profile() {
+    apparmor_restricts_userns || return 0
+    local profile=/etc/apparmor.d/openshell-firecracker-launcher
+    if [ "$(id -u)" -ne 0 ] || [ ! -d /etc/apparmor.d ] || ! command -v apparmor_parser >/dev/null 2>&1; then
+        say "note: this host restricts unprivileged user namespaces with AppArmor, and the"
+        say "      launcher needs them. Re-run with sudo --binaries-only to install a profile"
+        say "      that allows it, or see the README, \"User namespaces\"."
+        return 0
+    fi
+    cat > "$TMP/apparmor-profile" <<EOF
+abi <abi/4.0>,
+include <tunables/global>
+
+profile openshell-firecracker-launcher $LIBEXEC/openshell-firecracker-launcher flags=(unconfined) {
+  userns,
+
+  include if exists <local/openshell-firecracker-launcher>
+}
+EOF
+    place "$TMP/apparmor-profile" "$profile" 0644
+    if apparmor_parser -r "$profile"; then
+        say "loaded the AppArmor profile (allows user namespaces for the launcher only)"
+    else
+        say "warning: could not load $profile; see the README, \"User namespaces\"" >&2
+    fi
 }
 
 # INTERIM: the driver embeds a host supervisor that must speak the gateway's protocol.
@@ -146,7 +271,7 @@ warn_if_gateway_differs() {
     gateway="$(openshell-gateway --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
     if [ -n "$gateway" ] && [ "v$gateway" != "$built" ]; then
         say "warning: your gateway is $gateway but the driver was built for $built." >&2
-        say "         Upgrade OpenShell, or build interim-driver/ against your release." >&2
+        say "         Upgrade OpenShell, or build interim/ against your release." >&2
     fi
 }
 
@@ -191,11 +316,15 @@ cat <<EOF
 
 Installed. Still to do (the installer does not guess these):
 
-  1. Install Firecracker (1.4 or newer) and build the guest kernel:
-       see the README, "Guest kernel".
+  1. Install OpenShell (0.1.x) and Firecracker (1.16.1 or newer) if you have not:
+       see the README, "Install".
+       The launcher finds Firecracker beside itself, on PATH, or in /usr/local/bin,
+       /usr/bin or /opt/firecracker, and the guest kernel at $LIBEXEC/vmlinux.
+       Set OPENSHELL_VM_FIRECRACKER_BIN or OPENSHELL_VM_FIRECRACKER_KERNEL in the env
+       file only to put either somewhere else.
   2. Edit $CONFIG_HOME/openshell/firecracker-driver.env:
-       OPENSHELL_GRPC_ENDPOINT, OPENSHELL_VM_TLS_CA, OPENSHELL_VM_DRIVER_STATE_DIR,
-       the image, and the Firecracker and kernel paths. Replace USER.
+       OPENSHELL_GRPC_ENDPOINT, OPENSHELL_VM_TLS_CA, OPENSHELL_VM_DRIVER_STATE_DIR and
+       the image. Replace USER.
   3. Register the driver in $CONFIG_HOME/openshell/gateway.toml:
 
        [openshell.gateway]

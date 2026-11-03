@@ -55,30 +55,63 @@ Everything else is in the rest of this repository.
 
 ## Requirements
 
-- Linux with `/dev/kvm` readable and writable by the driver's user.
-- Unprivileged user namespaces (`sysctl user.max_user_namespaces` above 0).
-- Firecracker 1.4 or newer.
-- A guest kernel built for Firecracker ([Guest kernel](#guest-kernel)).
-- `e2fsprogs` (`debugfs`, `mke2fs`): the launcher writes the guest environment into the
-  overlay disk with `debugfs`, and the stock driver already needs both.
-- An installed OpenShell **v0.1.x** release (the host-supervisor protocol). The older
-  v0.0.x line runs the supervisor inside the guest and needs a guest NIC; this plugin
-  does not support it.
-- The gateway needs a `gateway_jwt` signing bundle, or sandbox creation fails: the
-  driver requires launch authentication.
+What you need, and the [Install](#install) step that provides it:
+
+| Need | Step |
+|---|---|
+| An installed OpenShell **v0.1.x** release (the host-supervisor protocol). The older v0.0.x line runs the supervisor inside the guest and needs a guest NIC; this plugin does not support it | 1 |
+| Firecracker 1.16.1 or newer (the first release that validates the Linux 6.18 guest kernel the plugin ships) | 2 |
+| The launcher, a driver that can use it, and a guest kernel (all pre-built) | 3 |
+| Linux x86_64 with `/dev/kvm` readable and writable by the driver's user, unprivileged user namespaces, and `e2fsprogs` (`debugfs`, `mke2fs`) | 4 |
+| A `gateway_jwt` signing bundle in the gateway: the driver requires launch authentication, or sandbox creation fails | 5 |
+
+Nothing needs a build toolchain. aarch64 has no pre-built assets.
 
 ## Install
 
-**From a release (no build toolchain).** Each release carries a pre-built launcher, an
-interim driver built against the latest OpenShell release (`openshell-version.txt` names
-it), the example units, checksums, and an installer. Download `install.sh` from the release
-(not from the repository: the release copy is stamped with the repository to download
-from), read it, then:
+Seven steps, in order. Steps 1 to 4 are one-off; `check` (step 6) verifies all of them.
+
+### 1. Install OpenShell
+
+```shell
+curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
+openshell-gateway --version        # must be 0.1.x
+```
+
+That is OpenShell's own installer (it sets up the CLI and a local gateway; see
+[its docs](https://docs.nvidia.com/openshell/latest/about/installation)). To read it first,
+download it with `curl -LsSfo`, read it, then run it with `sh`.
+
+### 2. Install Firecracker
+
+Release tarballs from [the Firecracker releases](https://github.com/firecracker-microvm/firecracker/releases)
+extract to `release-<version>-<arch>/`:
+
+```shell
+arch=$(uname -m)
+tag=$(curl -fsSL https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest \
+  | grep -m1 '"tag_name"' | cut -d'"' -f4)
+curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/$tag/firecracker-$tag-$arch.tgz" | tar -xz
+sudo install -m 0755 "release-$tag-$arch/firecracker-$tag-$arch" /usr/local/bin/firecracker
+firecracker --version              # 1.16.1 or newer
+```
+
+Each tarball has a `.sha256.txt` beside it on the release page. The launcher finds
+`firecracker` beside itself, on `PATH`, or in `/usr/local/bin`, `/usr/bin` or
+`/opt/firecracker`; set `OPENSHELL_VM_FIRECRACKER_BIN` only to use another location.
+
+### 3. Install the plugin
+
+Each plugin release carries pre-built assets and an installer: the launcher, a driver that
+can use it (an interim build of OpenShell's own, against the latest OpenShell release;
+`openshell-version.txt` names it), and a guest kernel built for Firecracker. Download
+`install.sh` from the release (not from the repository: the release copy is stamped with
+the repository to download from), read it, then:
 
 ```shell
 curl -fsSLO https://github.com/mr-miles/openshell-firecracker/releases/latest/download/install.sh
 chmod +x install.sh
-sudo ./install.sh --binaries-only     # executables, under /usr/local/libexec/openshell-firecracker
+sudo ./install.sh --binaries-only     # launcher, driver and kernel, under /usr/local/libexec/openshell-firecracker
 ./install.sh --config-only            # your user's systemd units and env file
 ./install.sh --dry-run                # show what it would do, change nothing
 ```
@@ -86,80 +119,146 @@ sudo ./install.sh --binaries-only     # executables, under /usr/local/libexec/op
 It verifies every download against `SHA256SUMS`, never overwrites a file you have edited
 (it writes `<file>.new` beside it), and warns if your gateway is not the OpenShell release
 the driver was built for. It needs only `bash`, `curl`, `tar` and `sha256sum`. It does not
-install Firecracker or build the guest kernel, and it does not edit `gateway.toml`; it
-prints what is left to do. Use `--launcher-only` once your OpenShell release has
-`OPENSHELL_VM_LAUNCHER_BIN`. The assets are built for x86_64 Linux only.
+edit `gateway.toml`; it prints what is left to do. `--no-kernel` skips the kernel (to use
+your own); `--launcher-only` skips the driver, once your OpenShell release has
+`OPENSHELL_VM_LAUNCHER_BIN`; `--no-subuids` skips the per-VM uid setup in
+[Host setup](#4-host-setup). The assets are built for x86_64 Linux only.
 
-The rest of this section builds from source instead, for another OpenShell release or
-architecture.
+The guest kernel is installed as `vmlinux` beside the launcher, where the launcher looks for
+it; set `OPENSHELL_VM_FIRECRACKER_KERNEL` only to use another one.
 
-1. **Build and install the launcher** (Rust 1.95; see `rust-toolchain.toml`):
+### 4. Host setup
 
-   ```shell
-   cargo build --release
-   sudo install -D target/release/openshell-firecracker-launcher \
-     /usr/local/libexec/openshell-firecracker/openshell-firecracker-launcher
-   ```
+One-off, per host:
 
-2. **Build the interim driver** ([`interim/`](interim/README.md)) from your release. The
-   driver must come from the same release as the gateway: its embedded host supervisor and
-   guest runtime have to speak the gateway's protocol. This needs `mise`, `gh` (logged in),
-   `git`, `zstd`, `curl` and `tar`; it checks out that release, patches it, stages its
-   runtime artifacts and builds. It installs only Rust, zig and cargo-zigbuild, not
-   OpenShell's full toolchain:
+- **KVM.** Your user needs read/write access to `/dev/kvm`: usually membership of the `kvm`
+  group (`sudo usermod -aG kvm "$USER"`, then log in again).
+- **`e2fsprogs`**, for `debugfs` and `mke2fs` (`sudo apt install e2fsprogs`; usually present).
+- **User namespaces.** The VMM jail needs unprivileged user namespaces
+  (`sysctl user.max_user_namespaces` above 0). Ubuntu 23.10 and later also confine them with
+  AppArmor (`cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns` prints `1`), which
+  makes the jail fail with `write /proc/self/setgroups: Permission denied`. `sudo
+  ./install.sh --binaries-only` installs a profile that allows them for the launcher only.
+  To do it by hand, create `/etc/apparmor.d/openshell-firecracker-launcher`:
 
-   ```shell
-   openshell-gateway --version                 # e.g. 0.1.6
-   OPENSHELL_TAG=v0.1.6 mise run interim:package
-   tar -xzf dist/openshell-driver-vm-interim-$(uname -m)-linux.tar.gz -C dist
-   sudo install -D dist/openshell-driver-vm-interim \
-     /usr/local/libexec/openshell-firecracker/openshell-driver-vm
-   ```
+  ```
+  abi <abi/4.0>,
+  include <tunables/global>
 
-   Install it under its own directory so it cannot collide with the packaged driver. Once
-   your OpenShell release has `OPENSHELL_VM_LAUNCHER_BIN`, use the packaged
-   `openshell-driver-vm` instead and delete `interim/` (see its README).
+  profile openshell-firecracker-launcher /usr/local/libexec/openshell-firecracker/openshell-firecracker-launcher flags=(unconfined) {
+    userns,
 
-3. **Install Firecracker and build the guest kernel.**
+    include if exists <local/openshell-firecracker-launcher>
+  }
+  ```
 
-4. **Configure and start the driver**, then the gateway ([Connect](#connect-to-the-installed-gateway)).
+  and load it with `sudo apparmor_parser -r /etc/apparmor.d/openshell-firecracker-launcher`.
+  The alternative, `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`, lifts the
+  restriction for every program on the host.
+- **Per-VM uids.** With the default `OPENSHELL_VM_FIRECRACKER_SUBUIDS=auto`, each VMM runs as
+  a subordinate uid if the host allows it, and otherwise as the driver's user with a warning
+  ([Per-VM uid](#per-vm-uid)). `sudo ./install.sh --binaries-only` sets this up for the user
+  who ran `sudo` (or `--user NAME`), skipping anything already in place:
+  - a 65536-id range for that user in `/etc/subuid` and `/etc/subgid`, after the ranges
+    already allocated;
+  - the `uidmap` package (`newuidmap`, `newgidmap`), on apt-based systems; elsewhere it tells
+    you to install it;
+  - a udev rule, `/etc/udev/rules.d/99-openshell-firecracker-kvm.rules`, making `/dev/kvm`
+    read/write for everyone. **This lets every local user use KVM.** Delete the file to
+    undo it.
 
-5. **Check the host.** With the same environment as the service:
+  Pass `--no-subuids` to skip all of it. Then, or if you installed without the installer, do
+  the same by hand: check `grep "$USER" /etc/subuid /etc/subgid` (add ranges with `sudo
+  usermod --add-subuids 200000-265535 --add-subgids 200000-265535 "$USER"`), install
+  `uidmap`, and make `/dev/kvm` world read/write.
 
-   ```shell
-   openshell-firecracker-launcher check
-   ```
+### 5. Configure
 
-   It reports Firecracker's version, KVM access, whether the VMM jail can be built,
-   `debugfs`/`mke2fs`, and sub-uid support, and exits nonzero on any failure. The example
-   unit runs it before the driver starts.
+- Edit `~/.config/openshell/firecracker-driver.env` (installed by `--config-only`):
+  `OPENSHELL_GRPC_ENDPOINT`, `OPENSHELL_VM_TLS_CA`, `OPENSHELL_VM_DRIVER_STATE_DIR`, the
+  image, and `USER`. The comments in the file say which are required.
+- Register the driver in `~/.config/openshell/gateway.toml` and make sure the gateway has a
+  `gateway_jwt` signing bundle ([Connect](#connect-to-the-installed-gateway)).
 
-## Guest kernel
+### 6. Check
 
-Firecracker needs an uncompressed `vmlinux` (x86_64) or `Image` (aarch64) with virtio-mmio,
-not PCI. Start from Firecracker's microvm CI config for your kernel version
-(`resources/guest_configs` in the Firecracker repository), then merge
-[`kernel/openshell-firecracker.kconfig`](kernel/openshell-firecracker.kconfig) and
-OpenShell's own `crates/openshell-driver-vm/runtime/kernel/openshell.kconfig` (Landlock,
-seccomp, cgroups):
-
-```shell
-cd linux-6.12.x
-cp <firecracker>/resources/guest_configs/<microvm-config-for-your-version> .config
-./scripts/kconfig/merge_config.sh -m .config \
-  <plugin>/kernel/openshell-firecracker.kconfig \
-  <openshell>/crates/openshell-driver-vm/runtime/kernel/openshell.kconfig
-make olddefconfig && make -j"$(nproc)" vmlinux
-```
-
-Assert the result. A missing symbol shows up as a silent hang or a panic at boot:
+With the same environment as the service:
 
 ```shell
-cat <plugin>/kernel/openshell-firecracker.kconfig \
-    <openshell>/crates/openshell-driver-vm/runtime/kernel/openshell.kconfig \
-  | grep -E '^CONFIG_[A-Z0-9_]+=y$' \
-  | while read -r line; do grep -qx "$line" .config || echo "MISSING $line"; done
+set -a; . ~/.config/openshell/firecracker-driver.env; set +a
+/usr/local/libexec/openshell-firecracker/openshell-firecracker-launcher check
 ```
+
+It checks every step above, in groups, and exits nonzero if anything failed:
+
+| Group | Checks |
+|---|---|
+| OpenShell | the gateway is installed and 0.1.x; the `openshell` CLI; the VM driver exists and accepts `OPENSHELL_VM_LAUNCHER_BIN`; that variable points at this launcher |
+| Host | Firecracker found (where) and new enough; the guest kernel found and uncompressed; `/dev/kvm` and the VMM jail (user namespaces, AppArmor); `debugfs`, `mke2fs`; sub-uid support |
+| Driver environment | gateway endpoint, TLS CA file, state directory, an image, a valid admission JSON |
+| Gateway configuration | `gateway.toml` selects `firecracker` and gives a `socket_path`; mentions `gateway_jwt` |
+
+Each failure says what to do. The example unit runs it before the driver starts. It does
+not boot a VM.
+
+### 7. Start
+
+```shell
+systemctl --user daemon-reload
+systemctl --user enable --now openshell-driver-firecracker.service
+systemctl --user restart openshell-gateway.service     # after every driver restart too
+openshell gateway info                                  # shows the firecracker driver
+```
+
+## Build from source
+
+For another OpenShell release, another architecture, or to change the plugin. Nothing here
+is needed to use a release.
+
+- **The launcher** (Rust 1.95; see `rust-toolchain.toml`):
+
+  ```shell
+  cargo build --release
+  sudo install -D target/release/openshell-firecracker-launcher \
+    /usr/local/libexec/openshell-firecracker/openshell-firecracker-launcher
+  ```
+
+- **The interim driver** ([`interim/`](interim/README.md)) from your release. The driver must
+  come from the same release as the gateway: its embedded host supervisor and guest runtime
+  have to speak the gateway's protocol. This needs `mise`, `gh` (logged in), `git`, `zstd`,
+  `curl` and `tar`; it checks out that release, patches it, stages its runtime artifacts and
+  builds. It installs only Rust, zig and cargo-zigbuild, not OpenShell's full toolchain:
+
+  ```shell
+  openshell-gateway --version                 # e.g. 0.1.6
+  OPENSHELL_TAG=v0.1.6 mise run interim:package
+  tar -xzf dist/openshell-driver-vm-interim-$(uname -m)-linux.tar.gz -C dist
+  sudo install -D dist/openshell-driver-vm-interim \
+    /usr/local/libexec/openshell-firecracker/openshell-driver-vm
+  ```
+
+  Install it under its own directory so it cannot collide with the packaged driver. Once
+  your OpenShell release has `OPENSHELL_VM_LAUNCHER_BIN`, use the packaged
+  `openshell-driver-vm` instead and delete `interim/` (see its README).
+
+- **The guest kernel**, which is the part that needs a C toolchain (`build-essential flex
+  bison bc libelf-dev libssl-dev xz-utils`). Firecracker needs an uncompressed `vmlinux`
+  with virtio-mmio, not PCI.
+  [`kernel/build.sh`](kernel/build.sh) downloads the newest Linux 6.18 (checked against
+  kernel.org's checksums), starts from Firecracker's own CI config for that series, merges
+  [`kernel/openshell-firecracker.kconfig`](kernel/openshell-firecracker.kconfig) and
+  OpenShell's `openshell.kconfig` (Landlock, seccomp, cgroups), fails if any option either
+  asks for is missing from the final configuration (a missing one shows up later as a silent
+  hang or a panic at boot), and packages the stripped `vmlinux`:
+
+  ```shell
+  OPENSHELL_TAG=v0.1.6 mise run kernel:package
+  tar -xzf dist/openshell-firecracker-kernel-$(uname -m)-linux.tar.gz -C dist
+  sudo install -m 0644 dist/vmlinux /usr/local/libexec/openshell-firecracker/vmlinux
+  ```
+
+  `KERNEL_SERIES`, `KERNEL_VERSION` and `FIRECRACKER_REF` choose another kernel (see the top
+  of the script). The release workflow runs the same script.
 
 ## Connect to the installed gateway
 
@@ -209,8 +308,8 @@ driver inherits:
 | Variable | Purpose |
 |---|---|
 | `OPENSHELL_VM_LAUNCHER_BIN` | Read by the driver (needs the upstream change): path to `openshell-firecracker-launcher` |
-| `OPENSHELL_VM_FIRECRACKER_BIN` | Absolute path to Firecracker |
-| `OPENSHELL_VM_FIRECRACKER_KERNEL` | Absolute path to the guest `vmlinux` |
+| `OPENSHELL_VM_FIRECRACKER_BIN` | Optional. Absolute path to Firecracker. Default: `firecracker` beside the launcher, on `PATH`, or in `/usr/local/bin`, `/usr/bin`, `/opt/firecracker` |
+| `OPENSHELL_VM_FIRECRACKER_KERNEL` | Optional. Absolute path to the guest `vmlinux`. Default: `vmlinux` beside the launcher, or in `/usr/local/libexec/openshell-firecracker`, `/var/lib/openshell-firecracker` |
 | `OPENSHELL_VM_FIRECRACKER_SUBUIDS` | `auto` (default), `required`, or `off`; see [Per-VM uid](#per-vm-uid) |
 | `OPENSHELL_VM_FIRECRACKER_LEASE_DIR` | Sub-uid lease directory. Defaults to `$XDG_RUNTIME_DIR/openshell-firecracker-leases` |
 | `OPENSHELL_FIRECRACKER_STOCK_DRIVER` | Path of the stock driver, if it cannot be found from the launcher's parent |
@@ -290,6 +389,8 @@ first sandbox. If that happens, set `off` to confirm the cause and read
 | Stock driver accepting `OPENSHELL_VM_LAUNCHER_BIN` | Not implemented upstream (issue filed). `interim/` patches it into OpenShell's driver at build time; the patch has a fixture test but has never been applied to a real release checkout |
 | Whether the image-preparation worker is started through the launcher | Not checked; the plugin hands it to the stock driver either way |
 | Conformance suite | Not run |
+| The rewritten `check` (OpenShell, driver, environment and `gateway.toml` groups), default locations for Firecracker and the kernel, the AppArmor profile in `install.sh` | Written; not compiled or run. The cause of the `setgroups` error on the host that reported it is likely AppArmor, not confirmed |
+| `kernel/build.sh` and the release `kernel` job | Written; never run. The Firecracker 6.18 guest config and the merged options have not been built into a kernel that boots; whether `# CONFIG_ACPI is not set` is right for Linux 6.18 with a current Firecracker is untested |
 
 Confirmed from the OpenShell repository, not by running anything: the launcher flag
 contract, the `launcher_bin` resolution, the `RuntimeInitiatedUnix` transport, the `0666`
@@ -300,14 +401,15 @@ supervisor control socket, and the external-driver registration keys (`compute_d
 
 | Symptom | Cause and fix |
 |---|---|
-| `check` reports `FAIL ... /dev/kvm` | `/dev/kvm` is not read/write for the user, or KVM is missing |
+| `check` reports `FAIL ... /dev/kvm` | `/dev/kvm` is not read/write for the user, or KVM is missing ([Host setup](#4-host-setup)) |
 | `check` reports a user-namespace error | `user.max_user_namespaces` is 0 or unprivileged namespaces are disabled |
-| `Firecracker ... is too old` | Install Firecracker 1.4 or newer |
+| `write /proc/self/setgroups: Permission denied` | AppArmor restricts user namespaces (Ubuntu 23.10 and later). No sudo needed at run time: install the AppArmor profile ([Host setup](#4-host-setup)) |
+| `Firecracker ... is too old` | Install Firecracker 1.16.1 or newer ([Install](#2-install-firecracker)) |
 | Driver ignores the plugin and boots libkrun | The driver build lacks `OPENSHELL_VM_LAUNCHER_BIN` (see `upstream/`) |
 | Gateway cannot connect to the socket | Socket under `/tmp` (hidden by `PrivateTmp`), or the driver runs as a different UID |
 | Sandbox create fails after a driver restart | Restart the gateway: the admission acknowledgement changed |
 | Create fails mentioning launch authentication | The gateway has no `gateway_jwt` signing bundle |
-| Guest hangs or panics at boot | A kernel option is missing; run the symbol check and read `rootfs-console.log` |
+| Guest hangs or panics at boot | Read `rootfs-console.log`. The release kernel is built by `kernel/build.sh`, which fails if a required option is missing; a kernel you supplied needs the same options |
 | Handshake fails with a certificate not-yet-valid error | Guest clock; check `date` in the console log |
 | Launcher says the guest environment file was not written | `debugfs` missing or the overlay path has spaces or quotes |
 
@@ -329,5 +431,7 @@ push and pull request, then builds the launcher. The tests need no KVM; the one 
 writes into an ext4 image skips itself when `e2fsprogs` is missing.
 
 The interim driver has `interim:*` tasks in `tasks/interim.toml`: `interim:ci` tests the
-patch, and `interim:package` builds and packages the driver. Releases are built by `.github/workflows/release.yml` when a `v*` tag
-is pushed; it calls `package:launcher`, `interim:package` and `package:assets`.
+patch, and `interim:package` builds and packages the driver. `kernel:package` builds the
+guest kernel (`kernel/build.sh`; it needs a C toolchain). Releases are built by
+`.github/workflows/release.yml` when a `v*` tag is pushed; it calls `package:launcher`,
+`kernel:package`, `interim:package` and `package:assets`.

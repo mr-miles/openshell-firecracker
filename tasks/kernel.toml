@@ -1,0 +1,6 @@
+# The Firecracker guest kernel. The release workflow builds it so users do not need a
+# C toolchain: install.sh downloads the result.
+
+["kernel:package"]
+description = "Build the guest kernel and package it into dist/ (needs a C toolchain; see kernel/build.sh)"
+run = "bash kernel/build.sh"

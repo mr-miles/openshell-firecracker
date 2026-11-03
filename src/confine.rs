@@ -39,6 +39,13 @@ use std::process::Command;
 pub const SHIM_ARG: &str = "__firecracker-vmm";
 const PROBE_ARG: &str = "--probe";
 
+/// Added to errors that unprivileged user namespaces commonly cause. Ubuntu 23.10
+/// and later confine them with AppArmor unless a profile allows the program.
+pub const USERNS_RESTRICTION_HINT: &str = "this host may restrict unprivileged user namespaces \
+     with AppArmor (kernel.apparmor_restrict_unprivileged_userns=1): the launcher needs an \
+     AppArmor profile that allows `userns`; sudo ./install.sh --binaries-only installs one, \
+     see the README, \"User namespaces\"";
+
 /// Directory, next to the VMM config, where the new root is assembled.
 const JAIL_ROOT_DIR: &str = ".fcroot";
 
@@ -304,8 +311,14 @@ fn unshare_namespaces(sub: bool) -> Result<(), String> {
         return wait_for_id_maps();
     }
     let write = |file: &str, content: String| {
-        std::fs::write(format!("/proc/self/{file}"), content)
-            .map_err(|error| format!("write /proc/self/{file}: {error}"))
+        std::fs::write(format!("/proc/self/{file}"), content).map_err(|error| {
+            let hint = if matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM)) {
+                format!(" ({USERNS_RESTRICTION_HINT})")
+            } else {
+                String::new()
+            };
+            format!("write /proc/self/{file}: {error}{hint}")
+        })
     };
     write("setgroups", "deny".to_string())?;
     write("uid_map", format!("0 {uid} 1"))?;

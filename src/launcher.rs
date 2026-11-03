@@ -25,6 +25,7 @@ use crate::config::{VSOCK_UDS_NAME, VmmConfig, bridge_socket_name};
 use crate::confine::{Access, Bind, JailSpec};
 use crate::console::pump;
 use crate::envfile;
+use crate::locate;
 use crate::signals::{
     clear_signal_forwarding, describe_exit, die_with_driver, install_signal_forwarding,
     wait_for_child,
@@ -51,17 +52,6 @@ pub struct HostConfig {
     pub lease_dir: PathBuf,
 }
 
-fn env_file(name: &str) -> Result<PathBuf, String> {
-    let path = PathBuf::from(std::env::var_os(name).ok_or_else(|| format!("{name} is not set"))?);
-    if !path.is_absolute() || !path.is_file() {
-        return Err(format!(
-            "{name} must be an absolute path to an existing file: {}",
-            path.display()
-        ));
-    }
-    Ok(path)
-}
-
 impl HostConfig {
     pub fn from_env() -> Result<Self, String> {
         let subuids = match std::env::var(ENV_SUBUIDS) {
@@ -78,9 +68,12 @@ impl HostConfig {
                 )),
             },
         };
+        // The variables are optional: without them, look beside the launcher, on
+        // PATH and in the standard directories (see `locate`).
+        let beside = locate::exe_dir();
         Ok(Self {
-            firecracker: env_file(ENV_BIN)?,
-            kernel: env_file(ENV_KERNEL)?,
+            firecracker: locate::firecracker(beside.as_deref())?.path,
+            kernel: locate::kernel(beside.as_deref())?.path,
             subuids,
             lease_dir,
         })

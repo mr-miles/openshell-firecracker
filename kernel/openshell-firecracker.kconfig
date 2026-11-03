@@ -1,11 +1,13 @@
 # Kernel config fragment for Firecracker sandbox guests.
 #
-# Apply on top of Firecracker's microvm-kernel CI config for the same Linux
-# version (resources/guest_configs in the Firecracker repository), then merge
-# the sandbox enforcement options OpenShell requires
+# kernel/build.sh applies it on top of Firecracker's microvm-kernel CI config for
+# the same Linux series (resources/guest_configs in the Firecracker repository),
+# then merges the sandbox enforcement options OpenShell requires
 # (crates/openshell-driver-vm/runtime/kernel/openshell.kconfig in the OpenShell
-# repository: Landlock, seccomp, cgroups, hardening). Build an uncompressed
-# `vmlinux` (x86_64) or `Image` (aarch64) and point
+# repository: Landlock, seccomp, cgroups, hardening), and fails if any option
+# below is missing from the final configuration. The release workflow runs it;
+# install.sh downloads the result as `vmlinux` beside the launcher. To use your own
+# kernel, build an uncompressed `vmlinux` (x86_64) or `Image` (aarch64) and point
 # OPENSHELL_VM_FIRECRACKER_KERNEL at it.
 #
 # Firecracker exposes devices over virtio-mmio, not PCI, and the guest has no
@@ -51,7 +53,9 @@ CONFIG_SYSFS=y
 CONFIG_TMPFS=y
 CONFIG_DEVTMPFS=y
 
-# Firecracker 1.10 ACPI tables leave virtio IRQs unrouted on Linux 6.12.
+# Firecracker 1.10 ACPI tables left virtio IRQs unrouted on Linux 6.12. Not yet
+# re-tested on the Linux 6.18 kernel the release now builds; devices are found from
+# the command line (CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES) either way.
 # CONFIG_ACPI is not set
 
 # No network device is ever attached.

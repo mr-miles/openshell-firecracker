@@ -1,6 +1,7 @@
 # Builds the release assets install.sh downloads, and publishes them.
 #
 #   openshell-firecracker-launcher-<arch>-linux.tar.gz   the launcher
+#   openshell-firecracker-kernel-<arch>-linux.tar.gz     the guest kernel (vmlinux)
 #   openshell-driver-vm-interim-<arch>-linux.tar.gz      INTERIM driver, built against the
 #                                                        latest OpenShell release
 #   openshell-version.txt                                which OpenShell release that is
@@ -34,6 +35,30 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: launcher
+          path: dist/*
+          if-no-files-found: error
+
+  # The guest kernel is built here so users need no C toolchain: install.sh downloads it.
+  kernel:
+    name: Guest kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+      - name: Install the kernel build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc libelf-dev libssl-dev xz-utils
+      - name: Build and package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: mise run kernel:package
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kernel
           path: dist/*
           if-no-files-found: error
 
@@ -81,7 +106,7 @@ jobs:
   publish:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [launcher, driver]
+    needs: [launcher, kernel, driver]
     runs-on: ubuntu-latest
     permissions:
       contents: write
