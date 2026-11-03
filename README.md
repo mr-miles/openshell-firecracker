@@ -387,15 +387,11 @@ first sandbox. If that happens, set `off` to confirm the cause and read
 
 | Check | Status |
 |---|---|
-| Config builder, jail arguments, console retention, bridge, argument parsing, leases | Unit tests written; not yet compiled or run in this repository |
-| `cargo clippy` / `rustfmt`, CI workflow | Written; CI has not run |
-| Jail on a real host (`unshare`, `pivot_root`, mount flags, PID namespace, sub-uid mapping) | Not run |
-| Boot of a real VM, vsock handshake through the bridge, guest clock | Not run (no KVM available when written) |
-| Stock driver accepting `OPENSHELL_VM_LAUNCHER_BIN` | Not implemented upstream (issue filed). `interim/` patches it into OpenShell's driver at build time; the patch has a fixture test but has never been applied to a real release checkout |
-| Whether the image-preparation worker is started through the launcher | Not checked; the plugin hands it to the stock driver either way |
-| Conformance suite | Not run |
-| The rewritten `check` (OpenShell, driver, environment and `gateway.toml` groups), default locations for Firecracker and the kernel, the AppArmor profile in `install.sh` | Written; not compiled or run. The cause of the `setgroups` error on the host that reported it is likely AppArmor, not confirmed |
-| `kernel/build.sh` and the release `kernel` job | Written; never run. The Firecracker 6.18 guest config and the merged options have not been built into a kernel that boots; whether `# CONFIG_ACPI is not set` is right for Linux 6.18 with a current Firecracker is untested |
+| Config builder, argument parsing, `check`, `cargo clippy` / `rustfmt`, CI | Unit tests pass and CI runs |
+| End to end on one real host | `openshell sandbox create` boots a Firecracker sandbox: the release-built Linux 6.18 guest kernel (with `# CONFIG_ACPI is not set`), the jail, image preparation, the gateway-to-driver socket and the supervisor connection all worked. Needed fixes along the way are in the git history (`/dev/fd` links, `gateway.toml` schema version and socket path) |
+| Interim driver | The release's driver, built from OpenShell's release plus `interim/` (`OPENSHELL_VM_LAUNCHER_BIN`), is what runs on that host |
+| Not checked on that host | The sub-uid isolation path (`OPENSHELL_VM_FIRECRACKER_SUBUIDS`), the AppArmor profile in `install.sh`, the guest clock, long-running or concurrent sandboxes, and the conformance suite |
+| Other hosts | One Ubuntu-style x86_64 host only; no arm64 |
 
 Confirmed from the OpenShell repository, not by running anything: the launcher flag
 contract, the `launcher_bin` resolution, the `RuntimeInitiatedUnix` transport, the `0666`
