@@ -95,13 +95,18 @@ LIBEXEC="$PREFIX/libexec/openshell-firecracker"
 # The driver and gateway run as a user service. Under sudo, $HOME is root's, so put
 # the user's files in the home of the user who will run them, owned by them.
 OWNER=""
+RUN_HOME="$HOME"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 _run_user="${RUN_USER:-${SUDO_USER:-}}"
 if [ "$(id -u)" -eq 0 ] && [ -n "$_run_user" ] && [ "$_run_user" != root ] && id "$_run_user" >/dev/null 2>&1; then
     OWNER="$_run_user"
     _home="$(getent passwd "$_run_user" | cut -d: -f6)"
     [ -n "$_home" ] || die "cannot find the home directory of $_run_user"
+    RUN_HOME="$_home"
     CONFIG_HOME="$_home/.config"
+elif [ "$(id -u)" -eq 0 ] && [ "$DO_CONFIG" -eq 1 ]; then
+    say "note: running as root with no other user named, so the user service files go to $CONFIG_HOME."
+    say "      Pass --user NAME to install them for the user who will run the driver."
 fi
 
 LAUNCHER_ASSET="openshell-firecracker-launcher-$ARCH-linux.tar.gz"
@@ -322,7 +327,7 @@ install_config() {
     sed "s|/usr/local/libexec/openshell-firecracker|$LIBEXEC|g" \
         "$ex/openshell-driver-firecracker.service" > "$TMP/unit"
     sed -e "s|/usr/local/libexec/openshell-firecracker|$LIBEXEC|g" \
-        -e "s|/home/USER|$(dirname "$CONFIG_HOME")|g" \
+        -e "s|/home/USER|$RUN_HOME|g" \
         "$ex/firecracker-driver.env" > "$TMP/env"
 
     place "$TMP/unit" "$CONFIG_HOME/systemd/user/openshell-driver-firecracker.service" 0644
