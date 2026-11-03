@@ -56,6 +56,24 @@ refuses "fails when 'struct Args' appears twice" "${patch[@]}" "$work/two-struct
 refuses "fails with no argument" "${patch[@]}"
 refuses "fails on a missing file" "${patch[@]}" "$work/absent.rs"
 
+# 6. The guest init fix.
+initfix=(bash "$here/apply-guest-init-fix.sh")
+cp "$here/fixtures/init.sh" "$work/init.sh"
+check "init fix applies to a fresh script" "${initfix[@]}" "$work/init.sh"
+check "creates /dev/fd" grep -q '^    ln -sfn /proc/self/fd /dev/fd' "$work/init.sh"
+check "creates stdin, stdout and stderr" grep -q '/dev/stderr' "$work/init.sh"
+check "the links come right after the devtmpfs mount" \
+    bash -c 'grep -A5 "^    mount -t devtmpfs devtmpfs /dev 2>/dev/null || true$" "$1" | grep -q "ln -sfn"' _ "$work/init.sh"
+check "the patched script still parses" bash -n "$work/init.sh"
+cp "$work/init.sh" "$work/init.after"
+check "init fix is idempotent" "${initfix[@]}" "$work/init.sh"
+check "second init run changes nothing" cmp -s "$work/init.sh" "$work/init.after"
+grep -vxF '    mount -t devtmpfs devtmpfs /dev 2>/dev/null || true' "$here/fixtures/init.sh" > "$work/no-anchor.sh"
+refuses "init fix fails without its anchor" "${initfix[@]}" "$work/no-anchor.sh"
+{ cat "$here/fixtures/init.sh"; printf '    mount -t devtmpfs devtmpfs /dev 2>/dev/null || true\n'; } > "$work/two-anchors.sh"
+refuses "init fix fails when its anchor is repeated" "${initfix[@]}" "$work/two-anchors.sh"
+refuses "init fix fails with no argument" "${initfix[@]}"
+
 if [ "$failures" -ne 0 ]; then
     printf '%s check(s) failed\n' "$failures" >&2
     exit 1
