@@ -23,6 +23,7 @@ DO_CONFIG=1
 DRIVER=1                        # INTERIM: remove with interim/
 KERNEL=1
 SUBUIDS=1
+FIRECRACKER=""                   # version to install, or empty to leave Firecracker alone
 RUN_USER=""
 DRY_RUN=0
 
@@ -36,6 +37,9 @@ Usage: install.sh [options]
   --config-only            install the systemd units and env file only (run as your user)
   --launcher-only          do not install the interim driver (use when your OpenShell
                            release has OPENSHELL_VM_LAUNCHER_BIN)
+  --firecracker VERSION    also download Firecracker (VERSION is a tag such as v1.17.0, or
+                           latest) from its GitHub releases and install it as
+                           PREFIX/bin/firecracker. Plugin needs 1.16.1 or newer
   --no-kernel              do not install the pre-built guest kernel (you supply your own)
   --no-subuids             do not set up per-VM uids (see below)
   --user NAME              the user who will run the driver (default: the user who ran sudo)
@@ -67,6 +71,7 @@ while [ $# -gt 0 ]; do
         --binaries-only) DO_CONFIG=0; shift ;;
         --config-only) DO_BINARIES=0; shift ;;
         --launcher-only) DRIVER=0; shift ;;
+        --firecracker) FIRECRACKER="${2:?--firecracker needs a version, e.g. v1.17.0 or latest}"; shift 2 ;;
         --no-kernel) KERNEL=0; shift ;;
         --no-subuids) SUBUIDS=0; shift ;;
         --user) RUN_USER="${2:?--user needs a value}"; shift 2 ;;
@@ -80,6 +85,7 @@ done
 [ "$REPO" != "$PLACEHOLDER" ] || die "no repository set: use the install.sh attached to a release, or pass --repo OWNER/NAME"
 [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "invalid --repo: $REPO"
 [[ "$TAG" == latest || "$TAG" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || die "invalid --version: $TAG"
+[ -z "$FIRECRACKER" ] || [[ "$FIRECRACKER" == latest || "$FIRECRACKER" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid --firecracker: $FIRECRACKER (use a tag like v1.17.0, or latest)"
 [ "$(uname -s)" = Linux ] || die "Linux only"
 case "$(uname -m)" in
     x86_64 | amd64) ARCH=x86_64 ;;
@@ -129,6 +135,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
         say "Download: $BASE/$LAUNCHER_ASSET"
         [ -z "$DRIVER_ASSET" ] || say "Download: $BASE/$DRIVER_ASSET"
         [ -z "$KERNEL_ASSET" ] || say "Download: $BASE/$KERNEL_ASSET"
+        if [ -n "$FIRECRACKER" ]; then
+            say "Download: https://github.com/firecracker-microvm/firecracker/releases ($FIRECRACKER, firecracker-<tag>-$ARCH.tgz, checksum-verified)"
+            say "Install:  $PREFIX/bin/firecracker"
+        fi
         say "Install:  $LIBEXEC/openshell-firecracker-launcher"
         [ -z "$DRIVER_ASSET" ] || say "Install:  $LIBEXEC/openshell-driver-vm"
         [ -z "$KERNEL_ASSET" ] || say "Install:  $LIBEXEC/vmlinux"
@@ -165,8 +175,30 @@ verify() {
 
 fetch SHA256SUMS
 
+# Firecracker's own release: firecracker-<tag>-<arch>.tgz with a .sha256.txt beside it,
+# extracting to release-<tag>-<arch>/firecracker-<tag>-<arch>.
+install_firecracker() {
+    local base="https://github.com/firecracker-microvm/firecracker/releases" tag="$FIRECRACKER" tgz dir
+    if [ "$tag" = latest ]; then
+        tag="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$base/latest" | sed 's|.*/||')"
+        [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "could not work out the latest Firecracker release (got '$tag'); pass --firecracker vX.Y.Z"
+    fi
+    tgz="firecracker-$tag-$ARCH.tgz"
+    mkdir -p "$TMP/fc"
+    curl -fsSL --retry 3 -o "$TMP/fc/$tgz" "$base/download/$tag/$tgz" || die "download failed: $base/download/$tag/$tgz"
+    curl -fsSL --retry 3 -o "$TMP/fc/$tgz.sha256.txt" "$base/download/$tag/$tgz.sha256.txt" || die "download failed: $tgz.sha256.txt"
+    (cd "$TMP/fc" && sha256sum -c --quiet "$tgz.sha256.txt") || die "checksum mismatch: $tgz"
+    tar -xzf "$TMP/fc/$tgz" -C "$TMP/fc"
+    dir="$TMP/fc/release-$tag-$ARCH"
+    [ -f "$dir/firecracker-$tag-$ARCH" ] || die "$tgz does not contain firecracker-$tag-$ARCH"
+    mkdir -p "$PREFIX/bin" 2>/dev/null || die "cannot create $PREFIX/bin: run with sudo (--binaries-only) or choose --prefix"
+    install -m 0755 "$dir/firecracker-$tag-$ARCH" "$PREFIX/bin/firecracker"
+    say "installed $PREFIX/bin/firecracker ($tag)"
+}
+
 install_binaries() {
     mkdir -p "$TMP/bin"
+    [ -z "$FIRECRACKER" ] || install_firecracker
     local assets=("$LAUNCHER_ASSET")
     [ -z "$DRIVER_ASSET" ] || assets+=("$DRIVER_ASSET")
     [ -z "$KERNEL_ASSET" ] || assets+=("$KERNEL_ASSET")

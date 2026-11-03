@@ -84,6 +84,11 @@ download it with `curl -LsSfo`, read it, then run it with `sh`.
 
 ### 2. Install Firecracker
 
+The easy way is to let the plugin installer do it in step 3: add `--firecracker latest` (or
+a tag such as `--firecracker v1.17.0`) to `sudo ./install.sh --binaries-only`. It downloads
+Firecracker's release, verifies its checksum and installs `/usr/local/bin/firecracker`
+(under `--prefix`). To do it by hand:
+
 Release tarballs from [the Firecracker releases](https://github.com/firecracker-microvm/firecracker/releases)
 extract to `release-<version>-<arch>/`:
 
