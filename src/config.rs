@@ -64,8 +64,27 @@ pub fn parse_firecracker_version(output: &str) -> Option<(u32, u32, u32)> {
     ))
 }
 
+/// Name of the variable carrying the real init path to the wrapper shell.
+const INIT_VARIABLE: &str = "OPENSHELL_FIRECRACKER_INIT";
+
+/// Run before the guest init: libkrun's own init creates these links, and OpenShell's
+/// init script (process substitution needs `/dev/fd`) relies on them. Firecracker
+/// boots that script directly as PID 1, so the wrapper makes them first.
+///
+/// The text goes on the kernel command line as one quoted word, so it must hold no
+/// `=` (the kernel would read it as an environment variable) and no `.` (a word with
+/// one is taken for a module parameter and dropped).
+const DEV_LINKS: &str = "ln -sfn /proc/self/fd /dev/fd; ln -sf /proc/self/fd/0 /dev/stdin; \
+     ln -sf /proc/self/fd/1 /dev/stdout; ln -sf /proc/self/fd/2 /dev/stderr";
+
 /// Kernel command line. Firecracker appends `root=/dev/vda` and `ro` itself
 /// for the root drive and adds the virtio-mmio device parameters.
+///
+/// The kernel starts `/bin/sh -c "<links>; exec $INIT"`, which makes the `/dev`
+/// links and then runs the real init, so the init script still runs as PID 1 under
+/// its own name. The path travels in an environment variable because a bare word
+/// containing `.`, such as `/srv/openshell-vm-sandbox-init.sh`, would not reach the
+/// shell as an argument.
 pub fn boot_args(init_path: &str) -> Result<String, String> {
     if !init_path.starts_with('/')
         || init_path
@@ -77,7 +96,8 @@ pub fn boot_args(init_path: &str) -> Result<String, String> {
     Ok(format!(
         "console=ttyS0 reboot=k panic=-1 pci=off random.trust_cpu=on \
          i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd \
-         rootfstype=ext4 init={init_path}"
+         rootfstype=ext4 init=/bin/sh {INIT_VARIABLE}={init_path} \
+         -c \"{DEV_LINKS}; exec ${INIT_VARIABLE}\""
     ))
 }
 
@@ -249,11 +269,37 @@ mod tests {
     #[test]
     fn boot_args_pin_the_init_and_leave_root_to_firecracker() {
         let args = boot_args("/srv/openshell-vm-sandbox-init.sh").unwrap();
-        assert!(args.contains("init=/srv/openshell-vm-sandbox-init.sh"));
+        assert!(args.contains("OPENSHELL_FIRECRACKER_INIT=/srv/openshell-vm-sandbox-init.sh"));
+        assert!(args.contains("exec $OPENSHELL_FIRECRACKER_INIT"));
         assert!(args.contains("pci=off"));
         assert!(
             !args.contains("root=/dev"),
             "Firecracker adds the root device"
+        );
+    }
+
+    #[test]
+    fn the_wrapper_creates_the_dev_links_the_init_script_needs() {
+        let args = boot_args("/srv/openshell-vm-sandbox-init.sh").unwrap();
+        for link in ["/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"] {
+            assert!(args.contains(link), "{link}");
+        }
+        assert!(args.contains(" init=/bin/sh "));
+    }
+
+    #[test]
+    fn the_wrapper_survives_the_kernel_command_line_parser() {
+        // The quoted word is one argument only if it holds no `=` and no `.`; the
+        // path is the one word allowed both, and it is carried by the variable.
+        assert!(!DEV_LINKS.contains('='), "{DEV_LINKS}");
+        assert!(!DEV_LINKS.contains('.'), "{DEV_LINKS}");
+        let args = boot_args("/srv/openshell-vm-sandbox-init.sh").unwrap();
+        let quoted = args.split('"').nth(1).unwrap();
+        assert!(!quoted.contains('=') && !quoted.contains('.'), "{quoted}");
+        assert!(quoted.starts_with("ln -sfn /proc/self/fd /dev/fd"));
+        assert!(
+            !args.contains(" init=/srv/"),
+            "init must be the wrapper shell"
         );
     }
 
