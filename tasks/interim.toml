@@ -47,13 +47,12 @@ fi
 '''
 
 ["interim:patch"]
-description = "Patch the checkout's VM driver: OPENSHELL_VM_LAUNCHER_BIN and the guest /dev/fd links"
+description = "Add OPENSHELL_VM_LAUNCHER_BIN to the checkout's VM driver"
 depends = ["interim:checkout"]
 run = '''
 set -eu
 dir="${OPENSHELL_DIR:-openshell}"
 bash interim/apply-launcher-override.sh "$dir/crates/openshell-driver-vm/src/main.rs"
-bash interim/apply-guest-init-fix.sh "$dir/crates/openshell-driver-vm/scripts/openshell-vm-sandbox-init.sh"
 '''
 
 ["interim:runtime"]

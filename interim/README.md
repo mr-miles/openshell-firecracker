@@ -20,15 +20,6 @@ option is already there. Because it patches the release's own file, it works on 
 release is checked out. An earlier version copied one release's `main.rs` and broke as soon as
 the pinned release and the copy disagreed.
 
-## The guest `/dev/fd` fix
-
-OpenShell's guest init script uses bash process substitution, which needs `/dev/fd`. With
-libkrun, libkrun's own init creates `/dev/fd`, `/dev/stdin`, `/dev/stdout` and `/dev/stderr`
-before the script runs; Firecracker boots the script directly as PID 1, so nothing does, and
-the guest panics with `/dev/fd/63: No such file or directory`. `apply-guest-init-fix.sh`
-adds the four links to the script's `mount_initial_fs`, found by anchor like the launcher
-patch. Delete it when OpenShell's script creates them itself.
-
 ## Releases
 
 Plugin releases ship a pre-built driver, built against the **latest OpenShell release** at
