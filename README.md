@@ -71,10 +71,13 @@ Everything else is in the rest of this repository.
 
 **From a release (no build toolchain).** Each release carries a pre-built launcher, an
 interim driver built against the latest OpenShell release (`openshell-version.txt` names
-it), the example units, checksums, and an installer. Download `install.sh` from the release,
-read it, then:
+it), the example units, checksums, and an installer. Download `install.sh` from the release
+(not from the repository: the release copy is stamped with the repository to download
+from), read it, then:
 
 ```shell
+curl -fsSLO https://github.com/mr-miles/openshell-firecracker/releases/latest/download/install.sh
+chmod +x install.sh
 sudo ./install.sh --binaries-only     # executables, under /usr/local/libexec/openshell-firecracker
 ./install.sh --config-only            # your user's systemd units and env file
 ./install.sh --dry-run                # show what it would do, change nothing
@@ -100,8 +103,10 @@ architecture.
 
 2. **Build the interim driver** ([`interim/`](interim/README.md)) from your release. The
    driver must come from the same release as the gateway: its embedded host supervisor and
-   guest runtime have to speak the gateway's protocol. This needs `mise`, `gh` and `git`;
-   it checks out that release, patches it, stages its runtime artifacts and builds:
+   guest runtime have to speak the gateway's protocol. This needs `mise`, `gh` (logged in),
+   `git`, `zstd`, `curl` and `tar`; it checks out that release, patches it, stages its
+   runtime artifacts and builds. It installs only Rust, zig and cargo-zigbuild, not
+   OpenShell's full toolchain:
 
    ```shell
    openshell-gateway --version                 # e.g. 0.1.6
@@ -113,7 +118,7 @@ architecture.
 
    Install it under its own directory so it cannot collide with the packaged driver. Once
    your OpenShell release has `OPENSHELL_VM_LAUNCHER_BIN`, use the packaged
-   `openshell-driver-vm` instead and delete `interim-driver/`.
+   `openshell-driver-vm` instead and delete `interim/` (see its README).
 
 3. **Install Firecracker and build the guest kernel.**
 
