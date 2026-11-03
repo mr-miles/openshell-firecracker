@@ -502,6 +502,50 @@ pub fn parse_env_value(text: &str, name: &str) -> Option<String> {
     })
 }
 
+/// Without `gateway_jwt` in gateway.toml the gateway uses the signing keys that
+/// OpenShell's installer generates in `<tls dir>/jwt/`.
+fn local_jwt_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("OPENSHELL_LOCAL_TLS_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir).join("jwt"));
+    }
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("state"))
+        })?;
+    Some(state.join("openshell").join("tls").join("jwt"))
+}
+
+fn check_local_jwt(out: &mut Vec<Finding>) {
+    let Some(dir) = local_jwt_dir() else {
+        out.push(Finding::Warn(
+            "gateway.toml has no gateway_jwt and the local signing keys cannot be located \
+             (HOME is not set)"
+                .to_string(),
+        ));
+        return;
+    };
+    let files = ["signing.pem", "public.pem", "kid"];
+    let present = files.iter().filter(|f| dir.join(f).is_file()).count();
+    match present {
+        3 => out.push(Finding::Ok(format!(
+            "launch authentication: the gateway uses the local signing keys in {}",
+            dir.display()
+        ))),
+        0 => out.push(Finding::Warn(format!(
+            "no gateway_jwt in gateway.toml and no local signing keys in {}. The driver \
+             requires launch authentication, so sandbox creation fails unless the gateway \
+             finds a signing bundle elsewhere",
+            dir.display()
+        ))),
+        _ => out.push(Finding::Fail(format!(
+            "partial local signing keys in {}: expected signing.pem, public.pem and kid",
+            dir.display()
+        ))),
+    }
+}
+
 fn gateway_config_path() -> Option<PathBuf> {
     Some(config_base()?.join("openshell").join("gateway.toml"))
 }
@@ -548,13 +592,12 @@ fn check_gateway_config(out: &mut Vec<Finding>) {
             path.display()
         ))),
     }
-    if !scanned.mentions_jwt {
-        out.push(Finding::Warn(
-            "gateway.toml does not mention gateway_jwt. The driver requires launch \
-             authentication, so the gateway needs a signing bundle or sandbox creation fails \
-             (OpenShell's installer may configure it elsewhere)"
-                .to_string(),
+    if scanned.mentions_jwt {
+        out.push(Finding::Ok(
+            "gateway.toml configures gateway_jwt for launch authentication".to_string(),
         ));
+    } else {
+        check_local_jwt(out);
     }
 }
 

@@ -196,7 +196,7 @@ It checks every step above, in groups, and exits nonzero if anything failed:
 | OpenShell | the gateway is installed and 0.1.x; the `openshell` CLI; the VM driver exists and accepts `OPENSHELL_VM_LAUNCHER_BIN`; that variable points at this launcher |
 | Host | Firecracker found (where) and new enough; the guest kernel found and uncompressed; `/dev/kvm` and the VMM jail (user namespaces, AppArmor); `debugfs`, `mke2fs`; sub-uid support |
 | Driver environment | gateway endpoint, TLS CA file, state directory, an image, a valid admission JSON |
-| Gateway configuration | `gateway.toml` selects `firecracker` and gives a `socket_path`; mentions `gateway_jwt` |
+| Gateway configuration | `gateway.toml` selects `firecracker` and gives a `socket_path`; launch authentication: `gateway_jwt` in it, or the local signing keys in `~/.local/state/openshell/tls/jwt/` |
 
 Each failure says what to do. The example unit runs it before the driver starts. It does
 not boot a VM.
