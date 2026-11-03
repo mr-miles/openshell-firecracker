@@ -102,6 +102,7 @@ LIBEXEC="$PREFIX/libexec/openshell-firecracker"
 # the user's files in the home of the user who will run them, owned by them.
 OWNER=""
 RUN_HOME="$HOME"
+RUN_UID="$(id -u)"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 _run_user="${RUN_USER:-${SUDO_USER:-}}"
 if [ "$(id -u)" -eq 0 ] && [ -n "$_run_user" ] && [ "$_run_user" != root ] && id "$_run_user" >/dev/null 2>&1; then
@@ -109,6 +110,7 @@ if [ "$(id -u)" -eq 0 ] && [ -n "$_run_user" ] && [ "$_run_user" != root ] && id
     _home="$(getent passwd "$_run_user" | cut -d: -f6)"
     [ -n "$_home" ] || die "cannot find the home directory of $_run_user"
     RUN_HOME="$_home"
+    RUN_UID="$(id -u "$_run_user")"
     CONFIG_HOME="$_home/.config"
 elif [ "$(id -u)" -eq 0 ] && [ "$DO_CONFIG" -eq 1 ]; then
     say "note: running as root with no other user named, so the user service files go to $CONFIG_HOME."
@@ -402,7 +404,7 @@ Installed. Still to do (the installer does not guess these):
        compute_driver = "firecracker"
 
        [openshell.drivers.firecracker]
-       socket_path = "/run/user/$(id -u)/openshell-firecracker/driver.sock"
+       socket_path = "/run/user/$RUN_UID/openshell-firecracker/driver.sock"
 
   4. Check the host, with the env file's values:
        set -a; . $CONFIG_HOME/openshell/firecracker-driver.env; set +a

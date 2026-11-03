@@ -601,7 +601,23 @@ fn check_gateway_config(out: &mut Vec<Finding>) {
         ))),
     }
     match scanned.socket_path {
-        Some(socket) => out.push(Finding::Ok(format!("driver socket: {socket}"))),
+        Some(socket) => {
+            // The unit binds %t/openshell-firecracker/driver.sock, %t being the
+            // running user's runtime directory.
+            let expected = std::env::var_os("XDG_RUNTIME_DIR")
+                .filter(|dir| !dir.is_empty())
+                .map(|dir| PathBuf::from(dir).join("openshell-firecracker/driver.sock"));
+            match expected {
+                Some(expected) if Path::new(&socket) != expected => {
+                    out.push(Finding::Fail(format!(
+                        "{} sets socket_path = {socket}, but the driver unit binds {}",
+                        path.display(),
+                        expected.display()
+                    )));
+                }
+                _ => out.push(Finding::Ok(format!("driver socket: {socket}"))),
+            }
+        }
         None => out.push(Finding::Fail(format!(
             "{} has no socket_path under [openshell.drivers.firecracker]",
             path.display()
