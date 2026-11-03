@@ -163,6 +163,8 @@ fn env_text(name: &str) -> Option<String> {
 pub struct GatewayToml {
     pub compute_driver: Option<String>,
     pub socket_path: Option<String>,
+    /// `version` under `[openshell]`: the gateway refuses a file without it.
+    pub schema_version: Option<String>,
     /// Any mention of `gateway_jwt`, the launch-authentication signing bundle.
     pub mentions_jwt: bool,
 }
@@ -192,6 +194,7 @@ pub fn scan_gateway_toml(text: &str) -> GatewayToml {
         if let Some((key, value)) = line.split_once('=') {
             let value = value.trim().trim_matches('"').to_string();
             match (table.as_str(), key.trim()) {
+                ("openshell", "version") => found.schema_version = Some(value),
                 ("openshell.gateway", "compute_driver") => found.compute_driver = Some(value),
                 ("openshell.drivers.firecracker", "socket_path") => found.socket_path = Some(value),
                 _ => {}
@@ -571,6 +574,18 @@ fn check_gateway_config(out: &mut Vec<Finding>) {
     };
     let scanned = scan_gateway_toml(&text.to_string_lossy());
 
+    match scanned.schema_version.as_deref() {
+        Some("2") => {}
+        Some(other) => out.push(Finding::Fail(format!(
+            "{} has [openshell] version = {other}; this plugin needs schema version 2",
+            path.display()
+        ))),
+        None => out.push(Finding::Fail(format!(
+            "{} has no `version = 2` under [openshell], so the gateway refuses to start \
+             (add `[openshell]` and `version = 2` at the top)",
+            path.display()
+        ))),
+    }
     match scanned.compute_driver.as_deref() {
         Some("firecracker") => out.push(Finding::Ok(format!(
             "{} selects the firecracker driver",
@@ -699,6 +714,16 @@ socket_path = "/run/user/1000/openshell-firecracker/driver.sock"
 "#;
         let scanned = scan_gateway_toml(text);
         assert_eq!(scanned.compute_driver.as_deref(), Some("firecracker"));
+        assert_eq!(
+            scan_gateway_toml("[openshell]\nversion = 2\n")
+                .schema_version
+                .as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            scan_gateway_toml("[openshell.gateway]\n").schema_version,
+            None
+        );
         assert_eq!(
             scanned.socket_path.as_deref(),
             Some("/run/user/1000/openshell-firecracker/driver.sock")

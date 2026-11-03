@@ -395,6 +395,9 @@ Installed. Still to do (the installer does not guess these):
        the image. Replace USER.
   3. Register the driver in $CONFIG_HOME/openshell/gateway.toml:
 
+       [openshell]
+       version = 2          # required: the gateway refuses a file without it
+
        [openshell.gateway]
        compute_driver = "firecracker"
 
