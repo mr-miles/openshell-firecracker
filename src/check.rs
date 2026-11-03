@@ -287,11 +287,14 @@ fn check_openshell(launcher: &Path, out: &mut Vec<Finding>) {
         },
     }
 
-    match env_text(LAUNCHER_ENV) {
+    // The service's environment file is what the driver runs with; the shell only
+    // counts when there is no file (a driver started by hand).
+    let from_file = driver_env_file_value(LAUNCHER_ENV);
+    match from_file.or_else(|| env_text(LAUNCHER_ENV)) {
         None => out.push(Finding::Fail(format!(
-            "{LAUNCHER_ENV} is not set, so the driver would boot libkrun VMs instead of \
-             Firecracker. Set it in the driver's environment file, and run check with that \
-             file loaded"
+            "{LAUNCHER_ENV} is not set in the driver's environment file ({}) or this shell, so the driver would boot libkrun VMs instead of Firecracker. The \
+             driver has no default for it: set it in that file",
+            driver_env_file().map_or("unknown".to_string(), |p| p.display().to_string())
         ))),
         Some(value) => {
             let configured = PathBuf::from(&value);
@@ -466,12 +469,41 @@ fn check_driver_environment(out: &mut Vec<Finding>) {
     }
 }
 
-fn gateway_config_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+fn config_base() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("openshell").join("gateway.toml"))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+}
+
+fn driver_env_file() -> Option<PathBuf> {
+    Some(
+        config_base()?
+            .join("openshell")
+            .join("firecracker-driver.env"),
+    )
+}
+
+/// `NAME=value` from the driver's environment file (uncommented, optionally quoted).
+fn driver_env_file_value(name: &str) -> Option<String> {
+    let text = std::fs::read_to_string(driver_env_file()?).ok()?;
+    parse_env_value(&text, name)
+}
+
+pub fn parse_env_value(text: &str, name: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let rest = line
+            .trim()
+            .strip_prefix(name)?
+            .trim_start()
+            .strip_prefix('=')?;
+        let value = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn gateway_config_path() -> Option<PathBuf> {
+    Some(config_base()?.join("openshell").join("gateway.toml"))
 }
 
 fn check_gateway_config(out: &mut Vec<Finding>) {
@@ -561,6 +593,16 @@ pub fn run(launcher: &Path) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_file_values_are_read_unless_commented() {
+        let text = "# OPENSHELL_VM_LAUNCHER_BIN=/no\nOPENSHELL_VM_LAUNCHER_BIN=\"/yes\"\nOTHER=1\n";
+        assert_eq!(
+            parse_env_value(text, "OPENSHELL_VM_LAUNCHER_BIN").as_deref(),
+            Some("/yes")
+        );
+        assert_eq!(parse_env_value("# X=1\n", "X"), None);
+    }
 
     #[test]
     fn a_missing_firecracker_is_a_failure() {

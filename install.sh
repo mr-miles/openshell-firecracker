@@ -321,13 +321,23 @@ install_config() {
     # Point the unit and env file at where the binaries were installed.
     sed "s|/usr/local/libexec/openshell-firecracker|$LIBEXEC|g" \
         "$ex/openshell-driver-firecracker.service" > "$TMP/unit"
-    sed "s|/usr/local/libexec/openshell-firecracker|$LIBEXEC|g" \
+    sed -e "s|/usr/local/libexec/openshell-firecracker|$LIBEXEC|g" \
+        -e "s|/home/USER|$(dirname "$CONFIG_HOME")|g" \
         "$ex/firecracker-driver.env" > "$TMP/env"
 
     place "$TMP/unit" "$CONFIG_HOME/systemd/user/openshell-driver-firecracker.service" 0644
     place "$ex/gateway-dropin.conf" \
         "$CONFIG_HOME/systemd/user/openshell-gateway.service.d/firecracker.conf" 0644
     place "$TMP/env" "$CONFIG_HOME/openshell/firecracker-driver.env" 0600
+
+    # An env file from an earlier install is kept as it is, but without this variable
+    # the driver boots libkrun VMs, so add it when it is missing.
+    local envfile="$CONFIG_HOME/openshell/firecracker-driver.env"
+    if [ -f "$envfile" ] && ! grep -q '^[[:space:]]*OPENSHELL_VM_LAUNCHER_BIN=' "$envfile"; then
+        printf '\n# Added by install.sh: run the plugin for every VM.\nOPENSHELL_VM_LAUNCHER_BIN=%s\n' \
+            "$LIBEXEC/openshell-firecracker-launcher" >> "$envfile"
+        say "added OPENSHELL_VM_LAUNCHER_BIN to $envfile"
+    fi
 }
 
 [ "$DO_BINARIES" -eq 0 ] || install_binaries
