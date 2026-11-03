@@ -58,6 +58,9 @@ rustup target add "$(uname -m)-unknown-linux-musl"
 cd "$dir"
 mise trust
 mise install
+# OpenShell's scripts read GITHUB_REPOSITORY (which Actions sets to *this* repo) to
+# decide where to download release artifacts from. Point them at OpenShell.
+export GITHUB_REPOSITORY=NVIDIA/OpenShell
 mise run vm:setup
 mise run vm:supervisor
 '''
