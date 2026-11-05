@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The stock VM driver's launcher command line.
+//! The VM driver's launcher command line.
 //!
 //! The driver runs its launcher as
 //! `<launcher> --internal-run-vm --vm-root-disk ... --vm-vsock-control-socket ...`
-//! and, for some work, other `--internal-*` modes. This is the subset of that
-//! contract the Firecracker launcher honors. Flags that only matter to libkrun
-//! (`--vm-krun-log-level`, `--vm-workdir`) are accepted and ignored.
+//! and, for its image-preparation worker, as `<launcher> --internal-prepare-image`.
+//! The flags are exactly the ones the vendored driver sends; an unknown flag is an
+//! error, so a driver and launcher that have drifted apart fail loudly. `--vm-workdir`
+//! is accepted and ignored: the guest init sets the working directory.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -28,9 +29,6 @@ pub struct LauncherArgs {
     #[arg(long = "vm-image-disk")]
     pub vm_image_disk: Option<PathBuf>,
 
-    #[arg(long = "vm-kernel-image")]
-    pub vm_kernel_image: Option<PathBuf>,
-
     #[arg(long = "vm-exec")]
     pub vm_exec: Option<String>,
 
@@ -49,18 +47,6 @@ pub struct LauncherArgs {
     #[arg(long = "vm-mem-mib", default_value_t = 2048)]
     pub vm_mem_mib: u32,
 
-    #[arg(long = "vm-krun-log-level", default_value_t = 1)]
-    pub vm_krun_log_level: u32,
-
-    #[arg(long = "vm-backend")]
-    pub vm_backend: Option<String>,
-
-    #[arg(long = "vm-gpu-bdf")]
-    pub vm_gpu_bdf: Option<String>,
-
-    #[arg(long = "vm-vsock-cid")]
-    pub vm_vsock_cid: Option<u32>,
-
     #[arg(long = "vm-vsock-control-port")]
     pub vm_vsock_control_port: Option<u32>,
 
@@ -69,9 +55,6 @@ pub struct LauncherArgs {
 
     #[arg(long = "vm-vsock-runtime-initiated")]
     pub vm_vsock_runtime_initiated: bool,
-
-    #[arg(long = "vm-mount")]
-    pub vm_mount: Vec<String>,
 }
 
 /// What the driver is asking its launcher to do.
@@ -81,7 +64,8 @@ pub enum Request {
     Check,
     /// Boot the VM under Firecracker.
     RunVm(Box<LauncherArgs>),
-    /// Anything the plugin does not handle: the stock driver binary runs it.
+    /// The driver's image-preparation worker: not a VM, so the driver binary that
+    /// started this launcher runs it.
     Delegate,
 }
 
@@ -102,13 +86,7 @@ pub fn classify(argv: &[OsString]) -> Result<Request, String> {
         );
     }
     let args = LauncherArgs::try_parse_from(argv).map_err(|error| error.to_string())?;
-    match args.vm_backend.as_deref() {
-        // The driver omits the backend for libkrun, which this plugin replaces.
-        None | Some("libkrun") => Ok(Request::RunVm(Box::new(args))),
-        // GPU sandboxes use QEMU; leave them to the stock driver.
-        Some("qemu") => Ok(Request::Delegate),
-        Some(other) => Err(format!("unknown VM backend: {other}")),
-    }
+    Ok(Request::RunVm(Box::new(args)))
 }
 
 #[cfg(test)]
@@ -143,8 +121,6 @@ mod tests {
         "5500",
         "--vm-vsock-control-socket",
         "/tmp/os-1/sb/control.sock",
-        "--vm-krun-log-level",
-        "1",
         "--vm-env",
         "A=1",
         "--vm-env",
@@ -152,7 +128,7 @@ mod tests {
     ];
 
     #[test]
-    fn the_drivers_libkrun_command_line_is_a_firecracker_run() {
+    fn the_drivers_command_line_is_a_firecracker_run() {
         let Request::RunVm(args) = classify(&argv(RUN)).unwrap() else {
             panic!("expected a VM run");
         };
@@ -168,10 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn qemu_and_the_image_worker_go_back_to_the_stock_driver() {
-        let mut qemu = RUN.to_vec();
-        qemu.extend(["--vm-backend", "qemu", "--vm-gpu-bdf", "0000:01:00.0"]);
-        assert_eq!(classify(&argv(&qemu)).unwrap(), Request::Delegate);
+    fn the_image_worker_goes_back_to_the_driver() {
         assert_eq!(
             classify(&argv(&["--internal-prepare-image", "/req.json"])).unwrap(),
             Request::Delegate
@@ -189,12 +162,19 @@ mod tests {
     }
 
     #[test]
-    fn unknown_backends_and_flags_are_errors() {
-        let mut bad = RUN.to_vec();
-        bad.extend(["--vm-backend", "xen"]);
-        assert!(classify(&argv(&bad)).is_err());
-        let mut unknown = RUN.to_vec();
-        unknown.push("--vm-surprise");
-        assert!(classify(&argv(&unknown)).is_err());
+    fn flags_for_removed_features_are_errors() {
+        for flag in [
+            "--vm-backend",
+            "--vm-gpu-bdf",
+            "--vm-vsock-cid",
+            "--vm-mount",
+            "--vm-kernel-image",
+            "--vm-krun-log-level",
+            "--vm-surprise",
+        ] {
+            let mut bad = RUN.to_vec();
+            bad.extend([flag, "x"]);
+            assert!(classify(&argv(&bad)).is_err(), "{flag}");
+        }
     }
 }

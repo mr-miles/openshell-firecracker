@@ -20,7 +20,7 @@ fn main() -> ExitCode {
             Ok(me) => exit_code(check::run(&me)),
             Err(error) => fail(&format!("locate this binary: {error}")),
         },
-        Ok(Request::Delegate) => fail(&delegate::exec_stock(&argv)),
+        Ok(Request::Delegate) => fail(&delegate::exec_driver(&argv)),
         Ok(Request::RunVm(args)) => match launcher::run(&args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(&error),

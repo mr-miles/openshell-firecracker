@@ -1,5 +1,5 @@
 # Rust format, lint, test and build tasks for the plugin.
-# The interim driver is a separate package: see interim.toml.
+# The vendored VM driver is a separate workspace: see driver.toml.
 
 ["rust:format"]
 description = "Format the plugin"
@@ -22,5 +22,5 @@ description = "Build the launcher in release mode"
 run = "cargo build --release"
 
 ["ci"]
-description = "Everything CI checks for the plugin: format, lint, test"
-depends = ["rust:format:check", "rust:lint", "rust:test"]
+description = "Everything CI checks: the launcher and the vendored driver (format, lint, test)"
+depends = ["rust:format:check", "rust:lint", "rust:test", "driver:ci"]

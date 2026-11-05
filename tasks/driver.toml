@@ -1,0 +1,58 @@
+# The VM driver: OpenShell's, vendored in vendor/openshell and trimmed to what the
+# Firecracker launcher needs (see vendor/openshell/crates/openshell-driver-vm/README.md).
+#
+# Checks (driver:ci) need only a Rust toolchain. Building a release driver also needs
+# the runtime artifacts it embeds (driver:stage): the host supervisor and guest
+# sandbox, built from the OpenShell revision in driver/UPSTREAM.env, and umoci.
+
+["driver:format:check"]
+description = "Check the vendored driver's formatting"
+run = "cd vendor/openshell && cargo fmt -p openshell-driver-vm -- --check"
+
+["driver:lint"]
+description = "Lint the vendored driver with Clippy (deny warnings)"
+run = "cd vendor/openshell && cargo clippy -p openshell-driver-vm --all-targets -- -D warnings"
+
+["driver:test"]
+description = "Run the vendored driver's tests (no KVM needed)"
+run = "cd vendor/openshell && cargo test -p openshell-driver-vm"
+
+["driver:ci"]
+description = "Everything CI checks for the vendored driver: format, lint, test"
+depends = ["driver:format:check", "driver:lint", "driver:test"]
+
+["driver:stage"]
+description = "Build the host supervisor and guest binaries, fetch umoci, into OPENSHELL_VM_RUNTIME_COMPRESSED_DIR"
+run = '''
+set -eu
+# Run from this repo's root so only our mise.toml (Rust) applies, plus the two tools
+# OpenShell's supervisor build prefers. Not OpenShell's own mise.toml: it pulls in
+# Python, Go, Node, Helm and more, none of which these steps need.
+target="$(uname -m)-unknown-linux-musl"
+mise exec -- rustup target add "$target"
+# Needs also: git, curl, zstd (present on GitHub's Ubuntu runners; install them elsewhere).
+mise exec zig@0.14.1 "github:rust-cross/cargo-zigbuild@0.22.3" -- bash driver/stage-runtime.sh
+'''
+
+["driver:build"]
+description = "Build the release driver with the staged runtime embedded"
+depends = ["driver:stage"]
+run = '''
+set -eu
+dir="${OPENSHELL_DIR:-$PWD/openshell}"
+OPENSHELL_VM_RUNTIME_COMPRESSED_DIR="${OPENSHELL_VM_RUNTIME_COMPRESSED_DIR:-$dir/target/vm-runtime-compressed}" \
+  cargo build --release --manifest-path vendor/openshell/Cargo.toml -p openshell-driver-vm --bin openshell-driver-vm
+'''
+
+["driver:package"]
+description = "Package the driver into dist/"
+depends = ["driver:build"]
+run = '''
+set -eu
+mkdir -p dist
+tar -czf "dist/openshell-driver-vm-$(uname -m)-linux.tar.gz" \
+  -C vendor/openshell/target/release openshell-driver-vm
+# install.sh reads this to tell the operator which OpenShell revision to match.
+. driver/UPSTREAM.env
+printf '%s\n' "$OPENSHELL_COMMIT" > dist/openshell-commit.txt
+'''

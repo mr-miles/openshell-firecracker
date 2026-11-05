@@ -9,9 +9,10 @@
 # a dedicated runtime directory the driver owns; do not move it to /tmp, which
 # the packaged gateway unit hides with PrivateTmp=true.
 #
-# The driver binary must support OPENSHELL_VM_LAUNCHER_BIN. Until your OpenShell
-# release has it, install the interim driver (interim/README.md) at the path
-# below; afterwards point this at the packaged openshell-driver-vm instead.
+# The driver is the one install.sh installs (vendor/openshell in the repository). It
+# needs OPENSHELL_VM_LAUNCHER_BIN, set in the environment file, and will not start
+# without it. Do not use OpenShell's packaged openshell-driver-vm here: it cannot run
+# the Firecracker launcher and does not apply an image's ENV and WORKDIR.
 
 [Unit]
 Description=OpenShell VM compute driver (Firecracker launcher)

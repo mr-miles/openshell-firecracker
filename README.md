@@ -1,22 +1,26 @@
 # OpenShell Firecracker plugin
 
-Run OpenShell sandboxes as Firecracker microVMs, next to an installed, compiled
-OpenShell release. No OpenShell crate is linked and the gateway is not modified.
+Run OpenShell sandboxes as Firecracker microVMs. The gateway is not modified.
 
 This is an external compute driver in the sense of
 [the driver docs](https://docs.nvidia.com/openshell/dev/extensibility/drivers#compute-drivers):
 a separate service listening on a Unix socket that implements `compute_driver.proto`,
-which the gateway does not start or supervise. The service is the stock
-`openshell-driver-vm`; this plugin replaces only the program it runs to boot each VM.
+which the gateway does not start or supervise. The service is OpenShell's VM driver,
+**vendored in this repository** (`vendor/openshell`) and trimmed to what Firecracker needs;
+the launcher (`src/`) is the program it runs to boot each VM. It is a Firecracker-only
+driver: libkrun, QEMU, GPU passthrough and virtiofs bind mounts are not part of it.
 
-> Status: written and unit-tested in parts, but not yet built end to end, and never
-> booted against a real VM or an installed gateway. See
-> [Verification status](#verification-status).
+It also differs from OpenShell's driver in one behavior: a sandbox starts the way a
+container does, with the image's `ENV` and in the image's `WORKDIR`
+([Image ENV and WORKDIR](#image-env-and-workdir)).
+
+> Status: unit-tested, but the vendored driver has not yet been booted against a real VM.
+> See [Verification status](#verification-status).
 
 ## How it works
 
 ```
- openshell-gateway ──gRPC over Unix socket──▶ openshell-driver-vm   (stock; external service)
+ openshell-gateway ──gRPC over Unix socket──▶ openshell-driver-vm   (vendored; external service)
                                                   │ for every VM: run the launcher
                                                   ▼
                                         openshell-firecracker-launcher   (this plugin)
@@ -25,33 +29,66 @@ which the gateway does not start or supervise. The service is the stock
  host supervisor ◀──── bridge ◀──── Firecracker ◀──vsock── guest (openshell-sandbox)
 ```
 
-- The stock driver does everything it does today: images, overlays, Stop/Start
-  generations, launch authentication, the host supervisor, policy. It believes it is
-  running libkrun VMs.
-- For each VM it runs its launcher with `--internal-run-vm` and a fixed set of flags.
-  This plugin is that launcher. It boots the guest under Firecracker instead.
-- Requests the plugin does not handle (the image-preparation worker, QEMU for GPU
-  sandboxes) are handed back to the stock driver binary, found as the launcher's parent
-  process.
+- The driver does the control-plane work: images, overlays, Stop/Start generations, launch
+  authentication, the host supervisor, policy. It boots no VMM itself.
+- For each VM, and for image preparation, it runs its launcher with `--internal-run-vm`
+  and a fixed set of flags (`OPENSHELL_VM_LAUNCHER_BIN` names it, and is required). This
+  plugin is that launcher; it boots the guest under Firecracker.
+- The driver's image-preparation worker is not a VM, so the launcher hands it back to the
+  driver binary, found as the launcher's parent process.
 - Guest to host traffic goes over vsock. Firecracker connects to a socket the launcher
   listens on, and the launcher relays to the supervisor. The supervisor's socket never
   enters the VMM jail.
 
 The guest has no network device.
 
-## One upstream change is required
+## The vendored driver
 
-The stock driver cannot yet be told to use a different launcher: its `main` always uses
-its own executable. [`upstream/launcher-override.md`](upstream/launcher-override.md) is
-the two-line change that adds `OPENSHELL_VM_LAUNCHER_BIN`, with the reasoning sent
-upstream.
+`vendor/openshell` holds the crates of OpenShell's VM driver and their dependencies, taken
+from NVIDIA/OpenShell commit `8d0797a` (pinned in [`driver/UPSTREAM.env`](driver/UPSTREAM.env)),
+as their own cargo workspace with upstream's lockfile. The changes from upstream are listed
+in [its README](vendor/openshell/crates/openshell-driver-vm/README.md): image `ENV` and
+`WORKDIR`, `OPENSHELL_VM_LAUNCHER_BIN`, and the removal of everything Firecracker does not
+use. The host supervisor and guest sandbox binaries the driver embeds are not vendored: they
+are built from the same pinned commit when a release is made.
 
-**Interim driver.** Until a release contains that option, [`interim/`](interim/) builds
-OpenShell's own VM driver with a small patch that adds it. Nothing of OpenShell's is copied
-here: the patch is applied to a checkout of the release at build time, by anchor, so it
-matches whichever release is checked out. It is isolated from the rest of the plugin and is
-removed by deleting that directory and its task file and workflow; see its README.
-Everything else is in the rest of this repository.
+### Compatibility
+
+The supervisor protocol is not stable across OpenShell revisions, so the gateway must come
+from a revision compatible with the one in `driver/UPSTREAM.env`. The vendored commit is a
+`main` commit, not a release tag. Whether it is compatible with a given OpenShell release
+(such as 0.1.x) has not been checked: until it is, run a gateway built from that commit
+or a later release known to match. `install.sh` prints the commit the installed driver
+was built from and the gateway's reported version, and leaves the comparison to you.
+
+### Image ENV and WORKDIR
+
+OpenShell's driver unpacks an image into a disk and ignored the image's `Config.Env` and
+`Config.WorkingDir`: every workload started in `/sandbox` with only the sandbox spec's
+environment. This driver reads both from the image configuration (registry images, and
+local Docker or Podman images), keeps them beside the cached disk as `image-config.json`,
+and applies them:
+
+- **Environment.** The image's `ENV` first, then the sandbox template's, then the sandbox
+  spec's, so the spec always wins. Entries the supervisor reserves (`OPENSHELL_*`) and
+  malformed ones are dropped.
+- **Working directory.** The workload starts in the image's `WORKDIR`. The guest init
+  creates it if absent and hands it to the sandbox user, so it is writable as in a
+  container, and it is passed to the supervisor as `--workdir`, which also makes it
+  writable under the filesystem policy. `HOME` follows it, unless the image sets `HOME`.
+- **No `WORKDIR`.** Starts in `/`, as a container would; nothing is made writable beyond
+  what the policy lists (by default only `/tmp`), and the driver logs a warning at launch.
+  Images that relied on the old `/sandbox` default (for example ones built from
+  OpenShell's `deploy/docker/Dockerfile.sandbox`) need a `WORKDIR /sandbox`, or set
+  `OPENSHELL_VM_DEFAULT_WORKDIR=/sandbox` on the driver: it applies to any sandbox whose
+  image sets no `WORKDIR`, rootfs tar uploads included, and never overrides an image's.
+  It must be an absolute path below `/` and is validated at driver start.
+- **Refused `WORKDIR`.** A relative path, one containing `..`, or one under `/proc`,
+  `/sys`, `/dev` or OpenShell's own directories is ignored with a warning.
+- Rootfs tar uploads carry no image configuration, so they start in `/` unless `OPENSHELL_VM_DEFAULT_WORKDIR` is set.
+- The image's `User` is not applied.
+
+Prepared-image caches from before this change are rebuilt once (cache layout `v5`).
 
 ## Requirements
 
@@ -59,9 +96,9 @@ What you need, and the [Install](#install) step that provides it:
 
 | Need | Step |
 |---|---|
-| An installed OpenShell **v0.1.x** release (the host-supervisor protocol). The older v0.0.x line runs the supervisor inside the guest and needs a guest NIC; this plugin does not support it | 1 |
+| An installed OpenShell gateway from a revision compatible with the driver's ([Compatibility](#compatibility)); the host-supervisor protocol is required. The older v0.0.x line runs the supervisor inside the guest and needs a guest NIC; this plugin does not support it | 1 |
 | Firecracker 1.16.1 or newer (the first release that validates the Linux 6.18 guest kernel the plugin ships) | 2 |
-| The launcher, a driver that can use it, and a guest kernel (all pre-built) | 3 |
+| The launcher, the VM driver and a guest kernel (all pre-built) | 3 |
 | Linux x86_64 with `/dev/kvm` readable and writable by the driver's user, unprivileged user namespaces, and `e2fsprogs` (`debugfs`, `mke2fs`) | 4 |
 | A `gateway_jwt` signing bundle in the gateway: the driver requires launch authentication, or sandbox creation fails | 5 |
 
@@ -107,9 +144,9 @@ Each tarball has a `.sha256.txt` beside it on the release page. The launcher fin
 
 ### 3. Install the plugin
 
-Each plugin release carries pre-built assets and an installer: the launcher, a driver that
-can use it (an interim build of OpenShell's own, against the latest OpenShell release;
-`openshell-version.txt` names it), and a guest kernel built for Firecracker. Download
+Each plugin release carries pre-built assets and an installer: the launcher, the VM driver
+(built from `vendor/openshell`; `openshell-commit.txt` names the OpenShell commit it is from),
+and a guest kernel built for Firecracker. Download
 `install.sh` from the release (not from the repository: the release copy is stamped with
 the repository to download from), read it, then:
 
@@ -122,11 +159,10 @@ sudo ./install.sh --binaries-only     # launcher, driver and kernel, under /usr/
 ```
 
 It verifies every download against `SHA256SUMS`, never overwrites a file you have edited
-(it writes `<file>.new` beside it), and warns if your gateway is not the OpenShell release
-the driver was built for. It needs only `bash`, `curl`, `tar` and `sha256sum`. It does not
+(it writes `<file>.new` beside it), and prints the OpenShell commit the driver was built from next to your gateway's version. It needs only `bash`, `curl`, `tar` and `sha256sum`. It does not
 edit `gateway.toml`; it prints what is left to do. `--no-kernel` skips the kernel (to use
-your own); `--launcher-only` skips the driver, once your OpenShell release has
-`OPENSHELL_VM_LAUNCHER_BIN`; `--no-subuids` skips the per-VM uid setup in
+your own); `--launcher-only` skips the driver, if you build `vendor/openshell` yourself;
+`--no-subuids` skips the per-VM uid setup in
 [Host setup](#4-host-setup). The assets are built for x86_64 Linux only.
 
 The guest kernel is installed as `vmlinux` beside the launcher, where the launcher looks for
@@ -217,8 +253,8 @@ openshell gateway info                                  # shows the firecracker 
 
 ## Build from source
 
-For another OpenShell release, another architecture, or to change the plugin. Nothing here
-is needed to use a release.
+For another architecture, or to change the plugin or driver. Nothing here is needed to use
+a release.
 
 - **The launcher** (Rust 1.95; see `rust-toolchain.toml`):
 
@@ -228,23 +264,22 @@ is needed to use a release.
     /usr/local/libexec/openshell-firecracker/openshell-firecracker-launcher
   ```
 
-- **The interim driver** ([`interim/`](interim/README.md)) from your release. The driver must
-  come from the same release as the gateway: its embedded host supervisor and guest runtime
-  have to speak the gateway's protocol. This needs `mise`, `gh` (logged in), `git`, `zstd`,
-  `curl` and `tar`; it checks out that release, patches it, stages its runtime artifacts and
-  builds. It installs only Rust, zig and cargo-zigbuild, not OpenShell's full toolchain:
+- **The driver** (`vendor/openshell`). Checking it needs only Rust (`mise run driver:ci`).
+  Building a release driver also stages the runtime it embeds: the host supervisor, guest
+  sandbox and guest init, built from the OpenShell commit in `driver/UPSTREAM.env` with that
+  commit's own bundling script, plus umoci. That needs `mise`, `git`, `zstd` and `curl`; it
+  installs only Rust, zig and cargo-zigbuild, not OpenShell's full toolchain. It compiles
+  a good part of OpenShell, so expect it to be slow the first time:
 
   ```shell
-  openshell-gateway --version                 # e.g. 0.1.6
-  OPENSHELL_TAG=v0.1.6 mise run interim:package
-  tar -xzf dist/openshell-driver-vm-interim-$(uname -m)-linux.tar.gz -C dist
-  sudo install -D dist/openshell-driver-vm-interim \
+  mise run driver:package
+  tar -xzf dist/openshell-driver-vm-$(uname -m)-linux.tar.gz -C dist
+  sudo install -D dist/openshell-driver-vm \
     /usr/local/libexec/openshell-firecracker/openshell-driver-vm
   ```
 
-  Install it under its own directory so it cannot collide with the packaged driver. Once
-  your OpenShell release has `OPENSHELL_VM_LAUNCHER_BIN`, use the packaged
-  `openshell-driver-vm` instead and delete `interim/` (see its README).
+  Use this driver, not OpenShell's packaged `openshell-driver-vm`: that one cannot run the
+  Firecracker launcher.
 
 - **The guest kernel**, which is the part that needs a C toolchain (`build-essential flex
   bison bc libelf-dev libssl-dev xz-utils`). Firecracker needs an uncompressed `vmlinux`
@@ -252,12 +287,12 @@ is needed to use a release.
   [`kernel/build.sh`](kernel/build.sh) downloads the newest Linux 6.18 (checked against
   kernel.org's checksums), starts from Firecracker's own CI config for that series, merges
   [`kernel/openshell-firecracker.kconfig`](kernel/openshell-firecracker.kconfig) and
-  OpenShell's `openshell.kconfig` (Landlock, seccomp, cgroups), fails if any option either
+  the vendored driver's `openshell.kconfig` (Landlock, seccomp, cgroups), fails if any option either
   asks for is missing from the final configuration (a missing one shows up later as a silent
   hang or a panic at boot), and packages the stripped `vmlinux`:
 
   ```shell
-  OPENSHELL_TAG=v0.1.6 mise run kernel:package
+  mise run kernel:package
   tar -xzf dist/openshell-firecracker-kernel-$(uname -m)-linux.tar.gz -C dist
   sudo install -m 0644 dist/vmlinux /usr/local/libexec/openshell-firecracker/vmlinux
   ```
@@ -307,17 +342,20 @@ environment file, a gateway drop-in that orders the two, and the `gateway.toml` 
 
 ## Configuration
 
-The stock driver reads its own options. The plugin reads these, from the environment the
+The driver reads its own options (below). The plugin reads these, from the environment the
 driver inherits:
 
 | Variable | Purpose |
 |---|---|
-| `OPENSHELL_VM_LAUNCHER_BIN` | Read by the driver (needs the upstream change): path to `openshell-firecracker-launcher` |
+| `OPENSHELL_VM_LAUNCHER_BIN` | Required, read by the driver: absolute path to `openshell-firecracker-launcher`. The driver will not start without it |
 | `OPENSHELL_VM_FIRECRACKER_BIN` | Optional. Absolute path to Firecracker. Default: `firecracker` beside the launcher, on `PATH`, or in `/usr/local/bin`, `/usr/bin`, `/opt/firecracker` |
 | `OPENSHELL_VM_FIRECRACKER_KERNEL` | Optional. Absolute path to the guest `vmlinux`. Default: `vmlinux` beside the launcher, or in `/usr/local/libexec/openshell-firecracker`, `/var/lib/openshell-firecracker` |
 | `OPENSHELL_VM_FIRECRACKER_SUBUIDS` | `auto` (default), `required`, or `off`; see [Per-VM uid](#per-vm-uid) |
 | `OPENSHELL_VM_FIRECRACKER_LEASE_DIR` | Sub-uid lease directory. Defaults to `$XDG_RUNTIME_DIR/openshell-firecracker-leases` |
-| `OPENSHELL_FIRECRACKER_STOCK_DRIVER` | Path of the stock driver, if it cannot be found from the launcher's parent |
+| `OPENSHELL_FIRECRACKER_DRIVER` | Path of the driver, if it cannot be found from the launcher's parent |
+
+The driver's `OPENSHELL_VM_DEFAULT_WORKDIR` (optional) sets the working directory for
+sandboxes whose image has none ([Image ENV and WORKDIR](#image-env-and-workdir)).
 
 The driver itself needs `OPENSHELL_GRPC_ENDPOINT` (required), `OPENSHELL_VM_TLS_CA` for an
 `https://` endpoint, `OPENSHELL_VM_DRIVER_STATE_DIR`, at least one of
@@ -345,7 +383,7 @@ Host requirements: ranges for the driver's user in `/etc/subuid` and `/etc/subgi
 setuid `newuidmap` and `newgidmap` helpers (package `uidmap`); `/dev/kvm` readable and
 writable by all users; Firecracker executable and the kernel readable by all users.
 
-Launchers coordinate through `flock`ed lease files, because the stock driver cannot hand
+Launchers coordinate through `flock`ed lease files, because the driver cannot hand
 a launcher an id. The kernel releases a lease when its launcher exits, so a crash cannot
 leak an id. The launcher shares only what the VMM needs: the overlay disk and a private
 socket directory are group-accessible, the sandbox state directory stays `0700`, and the
@@ -357,10 +395,8 @@ first sandbox. If that happens, set `off` to confirm the cause and read
 
 ## What does not work
 
-- Image preparation VMs and GPU (QEMU) launches are not Firecracker: the plugin hands
-  them to the stock driver. Image preparation therefore needs the stock driver's libkrun
-  runtime.
-- No virtiofs bind mounts and no GPU passthrough on Firecracker.
+- No virtiofs bind mounts and no GPU passthrough on Firecracker. A sandbox that asks for
+  either is rejected at validation, not ignored.
 - `[openshell.supervisor.network].additional_ca_bundle` and the shared supervisor pool
   are rejected by the gateway for any external driver.
 - Rootfs tar uploads need the driver and gateway on the same filesystem and UID.
@@ -368,7 +404,7 @@ first sandbox. If that happens, set `off` to confirm the cause and read
   `openshell-firecracker-launcher check` covers the Firecracker ones.
 - The VM driver does not advertise `isolation-backend` or `suspend-resume`, and does not
   implement `AuthenticateSandbox`.
-- Stop kills the VMM without a guest flush, as libkrun does. The overlay uses `Writeback`
+- Stop kills the VMM without a guest flush. The overlay uses `Writeback`
   caching so fsyncs reach the host file, and ext4 stays crash-consistent.
 - The Firecracker and kernel paths are checked when a VM launches, not pinned by hash.
 - aarch64 is untested.
@@ -380,7 +416,7 @@ first sandbox. If that happens, set `off` to confirm the cause and read
   the vsock directory and three device nodes. It drops the capability bounding set, sets
   `no_new_privs`, disables core dumps, and keeps Firecracker's own seccomp filter.
 - The guest environment file sits in the sandbox's own overlay (mode `0600`, root-owned).
-  It holds what the driver passes to the guest init, the same as the QEMU backend does.
+  It holds what the driver passes to the guest init.
 - Firecracker's `jailer` is not used.
 
 ## Verification status
@@ -389,14 +425,14 @@ first sandbox. If that happens, set `off` to confirm the cause and read
 |---|---|
 | Config builder, argument parsing, `check`, `cargo clippy` / `rustfmt`, CI | Unit tests pass and CI runs |
 | End to end on one real host | `openshell sandbox create` boots a Firecracker sandbox: the release-built Linux 6.18 guest kernel (with `# CONFIG_ACPI is not set`), the jail, image preparation, the gateway-to-driver socket and the supervisor connection all worked. Needed fixes along the way are in the git history (`/dev/fd` links, `gateway.toml` schema version and socket path) |
-| Interim driver | The release's driver, built from OpenShell's release plus `interim/` (`OPENSHELL_VM_LAUNCHER_BIN`), is what runs on that host |
-| Not checked on that host | The sub-uid isolation path (`OPENSHELL_VM_FIRECRACKER_SUBUIDS`), the AppArmor profile in `install.sh`, the guest clock, long-running or concurrent sandboxes, and the conformance suite |
+| Vendored driver | **Not booted.** The end-to-end result above was with OpenShell's v0.1.6 driver plus a launcher-override patch, before the driver was vendored. The vendored driver (commit `8d0797a`, with `ENV`/`WORKDIR` and the removals) passes its unit tests and builds, but has not run a sandbox. The release packaging (`driver:package`, `driver/stage-runtime.sh`) has not been run end to end either: only its source fetch and umoci download were checked |
+| Not checked on that host | The sub-uid isolation path (`OPENSHELL_VM_FIRECRACKER_SUBUIDS`), the AppArmor profile in `install.sh`, the guest clock, long-running or concurrent sandboxes, image `ENV`/`WORKDIR` in a real guest, and OpenShell's conformance suite (`tests/suites/conformance` in the OpenShell repository), which is what would show parity with other drivers |
 | Other hosts | One Ubuntu-style x86_64 host only; no arm64 |
 
 Confirmed from the OpenShell repository, not by running anything: the launcher flag
-contract, the `launcher_bin` resolution, the `RuntimeInitiatedUnix` transport, the `0666`
-supervisor control socket, and the external-driver registration keys (`compute_driver`,
-`[openshell.drivers.<name>] socket_path`) at v0.1.6.
+contract, the `RuntimeInitiatedUnix` transport, the `0666` supervisor control socket, and the
+external-driver registration keys (`compute_driver`, `[openshell.drivers.<name>]
+socket_path`) at v0.1.6 and at the vendored commit.
 
 ## Troubleshooting
 
@@ -406,7 +442,8 @@ supervisor control socket, and the external-driver registration keys (`compute_d
 | `check` reports a user-namespace error | `user.max_user_namespaces` is 0 or unprivileged namespaces are disabled |
 | `write /proc/self/setgroups: Permission denied` | AppArmor restricts user namespaces (Ubuntu 23.10 and later). No sudo needed at run time: install the AppArmor profile ([Host setup](#4-host-setup)) |
 | `Firecracker ... is too old` | Install Firecracker 1.16.1 or newer ([Install](#2-install-firecracker)) |
-| Driver ignores the plugin and boots libkrun | The driver build lacks `OPENSHELL_VM_LAUNCHER_BIN` (see `upstream/`) |
+| Driver exits with `OPENSHELL_VM_LAUNCHER_BIN is required` | Set it in the driver's environment file ([Configure](#5-configure)). Make sure the service runs the vendored driver install.sh installs, not OpenShell's packaged one |
+| Workload starts in `/`, or lacks the image's variables | The image has no `WORKDIR`/`ENV`, or its cached disk predates this driver (it is rebuilt once). See [Image ENV and WORKDIR](#image-env-and-workdir) |
 | Gateway cannot connect to the socket | Socket under `/tmp` (hidden by `PrivateTmp`), or the driver runs as a different UID |
 | Sandbox create fails after a driver restart | Restart the gateway: the admission acknowledgement changed |
 | Create fails mentioning launch authentication | The gateway has no `gateway_jwt` signing bundle |
@@ -427,12 +464,13 @@ mise run package:launcher     # release build, packaged into dist/
 ```
 
 CI runs the same tasks, so a local run and a workflow run do the same thing.
-`.github/workflows/ci.yml` runs `rust:format:check`, `rust:lint` and `rust:test` on every
-push and pull request, then builds the launcher. The tests need no KVM; the one that
+`.github/workflows/ci.yml` runs `rust:format:check`, `rust:lint` and `rust:test`, and
+`driver:ci`, on every push and pull request, then builds the launcher. The tests need no KVM; the one that
 writes into an ext4 image skips itself when `e2fsprogs` is missing.
 
-The interim driver has `interim:*` tasks in `tasks/interim.toml`: `interim:ci` tests the
-patch, and `interim:package` builds and packages the driver. `kernel:package` builds the
-guest kernel (`kernel/build.sh`; it needs a C toolchain). Releases are built by
-`.github/workflows/release.yml` when a `v*` tag is pushed; it calls `package:launcher`,
-`kernel:package`, `interim:package` and `package:assets`.
+The vendored driver is its own cargo workspace (`vendor/openshell`), so its checks are
+separate tasks: `driver:ci` runs its format check, clippy (deny warnings) and tests, and is
+part of `ci`. `driver:package` stages the runtime, builds the driver and packages it.
+`kernel:package` builds the guest kernel (`kernel/build.sh`; it needs a C toolchain).
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed; it calls `package:launcher`,
+`kernel:package`, `driver:package` and `package:assets`.

@@ -20,7 +20,7 @@ TAG="latest"
 PREFIX="/usr/local"
 DO_BINARIES=1
 DO_CONFIG=1
-DRIVER=1                        # INTERIM: remove with interim/
+DRIVER=1
 KERNEL=1
 SUBUIDS=1
 FIRECRACKER=""                   # version to install, or empty to leave Firecracker alone
@@ -35,8 +35,8 @@ Usage: install.sh [options]
   --prefix DIR           install under DIR/libexec/openshell-firecracker (default: /usr/local)
   --binaries-only          install the executables only (the part that needs root)
   --config-only            install the systemd units and env file only (run as your user)
-  --launcher-only          do not install the interim driver (use when your OpenShell
-                           release has OPENSHELL_VM_LAUNCHER_BIN)
+  --launcher-only          do not install the VM driver (use when you build vendor/openshell
+                           yourself)
   --firecracker VERSION    also download Firecracker (VERSION is a tag such as v1.17.0, or
                            latest) from its GitHub releases and install it as
                            PREFIX/bin/firecracker. Plugin needs 1.16.1 or newer
@@ -118,11 +118,11 @@ elif [ "$(id -u)" -eq 0 ] && [ "$DO_CONFIG" -eq 1 ]; then
 fi
 
 LAUNCHER_ASSET="openshell-firecracker-launcher-$ARCH-linux.tar.gz"
-# INTERIM: the driver is built against the latest OpenShell release when the plugin
-# release is made; openshell-version.txt says which.
+# The driver is the one vendored in this repository (vendor/openshell), built from the
+# OpenShell revision named in openshell-commit.txt.
 DRIVER_ASSET=""
 if [ "$DO_BINARIES" -eq 1 ] && [ "$DRIVER" -eq 1 ]; then
-    DRIVER_ASSET="openshell-driver-vm-interim-$ARCH-linux.tar.gz"
+    DRIVER_ASSET="openshell-driver-vm-$ARCH-linux.tar.gz"
 fi
 # The guest kernel is built by the release workflow, so nothing here compiles one.
 KERNEL_ASSET=""
@@ -214,7 +214,7 @@ install_binaries() {
     install -m 0755 "$TMP/bin/openshell-firecracker-launcher" "$LIBEXEC/openshell-firecracker-launcher"
     say "installed $LIBEXEC/openshell-firecracker-launcher"
     if [ -n "$DRIVER_ASSET" ]; then
-        install -m 0755 "$TMP/bin/openshell-driver-vm-interim" "$LIBEXEC/openshell-driver-vm"
+        install -m 0755 "$TMP/bin/openshell-driver-vm" "$LIBEXEC/openshell-driver-vm"
         say "installed $LIBEXEC/openshell-driver-vm"
         warn_if_gateway_differs
     fi
@@ -309,19 +309,20 @@ EOF
     fi
 }
 
-# INTERIM: the driver embeds a host supervisor that must speak the gateway's protocol.
+# The driver embeds a host supervisor that must speak the gateway's protocol, and the
+# protocol is not stable across OpenShell revisions. A gateway's version cannot be
+# mapped to a revision, so this reports both and leaves the comparison to the operator.
 warn_if_gateway_differs() {
-    fetch openshell-version.txt
-    verify openshell-version.txt
+    fetch openshell-commit.txt
+    verify openshell-commit.txt
     local built gateway
-    built="$(tr -d '[:space:]' < "$TMP/openshell-version.txt")"
-    say "the driver was built against OpenShell $built"
+    built="$(tr -d '[:space:]' < "$TMP/openshell-commit.txt")"
+    say "the driver was built from OpenShell commit $built"
     command -v openshell-gateway >/dev/null 2>&1 || return 0
-    gateway="$(openshell-gateway --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
-    if [ -n "$gateway" ] && [ "v$gateway" != "$built" ]; then
-        say "warning: your gateway is $gateway but the driver was built for $built." >&2
-        say "         Upgrade OpenShell, or build interim/ against your release." >&2
-    fi
+    gateway="$(openshell-gateway --version 2>/dev/null | head -n1 || true)"
+    [ -z "$gateway" ] || say "your gateway reports: $gateway"
+    say "note: the gateway must come from a compatible OpenShell revision; the supervisor"
+    say "      protocol is not stable across revisions. See the README, \"Compatibility\"."
 }
 
 # Install $1 as $2 with mode $3, never overwriting a file that differs: write

@@ -5,7 +5,7 @@
 //! Pure data: nothing here touches files or processes, so the device model and
 //! kernel command line stay unit-testable on hosts without KVM.
 //!
-//! The device model mirrors the stock VM driver's other backends so the guest
+//! The device model is what the VM driver's guest init expects, so the guest
 //! init needs no Firecracker-specific code: `/dev/vda` is the read-only
 //! bootstrap root, `/dev/vdb` the per-sandbox writable overlay, and `/dev/vdc`
 //! the optional read-only prepared image disk. The guest has no network device.
@@ -67,7 +67,7 @@ pub fn parse_firecracker_version(output: &str) -> Option<(u32, u32, u32)> {
 /// Name of the variable carrying the real init path to the wrapper shell.
 const INIT_VARIABLE: &str = "OPENSHELL_FIRECRACKER_INIT";
 
-/// Run before the guest init: libkrun's own init creates these links, and OpenShell's
+/// Run before the guest init: a VMM's own init usually creates these links, and OpenShell's
 /// init script (process substitution needs `/dev/fd`) relies on them. Firecracker
 /// boots that script directly as PID 1, so the wrapper makes them first.
 ///

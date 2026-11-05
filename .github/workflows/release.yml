@@ -2,9 +2,8 @@
 #
 #   openshell-firecracker-launcher-<arch>-linux.tar.gz   the launcher
 #   openshell-firecracker-kernel-<arch>-linux.tar.gz     the guest kernel (vmlinux)
-#   openshell-driver-vm-interim-<arch>-linux.tar.gz      INTERIM driver, built against the
-#                                                        latest OpenShell release
-#   openshell-version.txt                                which OpenShell release that is
+#   openshell-driver-vm-<arch>-linux.tar.gz              the VM driver (vendor/openshell)
+#   openshell-commit.txt                                 the OpenShell revision it is from
 #   examples.tar.gz, install.sh, SHA256SUMS
 #
 # Every step is a mise task (tasks/*.toml), so a local `mise run` does the same.
@@ -53,8 +52,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential flex bison bc libelf-dev libssl-dev xz-utils
       - name: Build and package
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: mise run kernel:package
       - uses: actions/upload-artifact@v7
         with:
@@ -62,41 +59,31 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # INTERIM: delete this job with the interim/ directory once the upstream
-  # launcher override ships (see interim/README.md).
+  # The VM driver, vendored in vendor/openshell. Compiling is the slow part: the
+  # supervisor and guest binaries come from the pinned OpenShell revision
+  # (driver/UPSTREAM.env), then the driver embeds them. Both target directories are
+  # cached per pin.
   driver:
-    name: Interim driver
+    name: VM driver
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
-      - name: Resolve the OpenShell release
-        id: openshell
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mise run interim:version
-          echo "tag=$(cat dist/openshell-version.txt)" >> "$GITHUB_OUTPUT"
-      # Compiling OpenShell is the slow part (three release builds). Cache its target
-      # directory per release; a new release reuses the dependency builds.
       - uses: actions/cache@v6
         with:
           path: |
             openshell/target
+            vendor/openshell/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: openshell-${{ steps.openshell.outputs.tag }}-${{ runner.arch }}-${{ hashFiles('interim/**', 'tasks/interim.toml', 'mise.toml') }}
-          restore-keys: |
-            openshell-${{ steps.openshell.outputs.tag }}-${{ runner.arch }}-
-            openshell-v
-      # Checks out that release, patches in the launcher override, stages its runtime
-      # artifacts (host supervisor, guest sandbox and init, umoci, libkrun) with
-      # OpenShell's own scripts, then builds OpenShell's VM driver and packages it.
-      # Only Rust, zig and cargo-zigbuild are installed; not OpenShell's full toolchain.
+          key: driver-${{ runner.arch }}-${{ hashFiles('driver/**', 'vendor/openshell/Cargo.lock', 'tasks/driver.toml', 'mise.toml') }}
+          restore-keys: driver-${{ runner.arch }}-
+      # Fetches the pinned OpenShell revision, builds its host supervisor and static
+      # guest binaries with its own bundling script, downloads umoci, then builds the
+      # vendored driver with those embedded. Only Rust, zig and cargo-zigbuild are
+      # installed; not OpenShell's full toolchain.
       - name: Build and package
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: mise run interim:package
+        run: mise run driver:package
       - uses: actions/upload-artifact@v7
         with:
           name: driver

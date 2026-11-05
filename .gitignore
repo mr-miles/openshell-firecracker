@@ -1,15 +1,17 @@
 # Cargo build output. Cargo.lock is kept: the launcher is a binary.
 /target
+/vendor/openshell/target
 
 # Release staging (release.yml builds these in CI; a local run may leave them).
 /dist
 /assets
-# The OpenShell checkout that `mise run interim:runtime` stages the driver's runtime from.
+# The OpenShell checkout that `mise run driver:stage` builds the driver's runtime from.
 /openshell
 
 # Real configuration and secrets. Only the examples are tracked.
 *.env
 !/examples/*.env
+!/driver/UPSTREAM.env
 *.pem
 *.key
 

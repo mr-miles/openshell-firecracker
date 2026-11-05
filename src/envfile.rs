@@ -2,10 +2,9 @@
 
 //! Guest environment, injected into the overlay disk.
 //!
-//! libkrun passes the guest init its environment directly. Firecracker has no
-//! equivalent, so the launcher writes a small shell file into the overlay disk
-//! before boot, which the stock guest init sources early
-//! (`/overlay/upper/srv/openshell-env.sh`). It does the same job for QEMU.
+//! Firecracker cannot pass the guest init an environment, so the launcher writes
+//! a small shell file into the overlay disk before boot, which the guest init
+//! sources early (`/overlay/upper/srv/openshell-env.sh`).
 //!
 //! The file also sets the guest clock: Firecracker has no RTC on x86_64, so
 //! the guest would start in 1970 and fail certificate validity checks.
