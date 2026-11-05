@@ -27,6 +27,8 @@ pub mod lifecycle;
 #[cfg(feature = "compute-driver")]
 pub mod otel_tracing;
 #[cfg(feature = "compute-driver")]
+mod podman_socket;
+#[cfg(feature = "compute-driver")]
 pub mod procguard;
 #[cfg(feature = "compute-driver")]
 mod rootfs;

@@ -3,21 +3,7 @@
 
 [workspace]
 resolver = "2"
-members = [
-    "crates/openshell-core",
-    "crates/openshell-crypto",
-    "crates/openshell-driver-podman",
-    "crates/openshell-driver-vm",
-    "crates/openshell-extension-core",
-    "crates/openshell-isolation-interface",
-    "crates/openshell-ocsf",
-    "crates/openshell-ocsf-validate",
-    "crates/openshell-otel",
-    "crates/openshell-otel-test-support",
-    "crates/openshell-policy",
-    "crates/openshell-policy-schema",
-    "crates/openshell-sandbox-backend",
-]
+members = ["crates/openshell-driver-vm"]
 
 [workspace.package]
 version = "0.0.0"
@@ -28,7 +14,15 @@ repository = "https://github.com/NVIDIA/OpenShell"
 
 [workspace.dependencies]
 # Product backend selection. Consumer crates inherit this choice.
-openshell-crypto = { path = "crates/openshell-crypto", default-features = false, features = ["aws-lc"] }
+# The rest of OpenShell, from the revision driver/UPSTREAM.env names (keep the two in sync:
+# `mise run driver:check-pin` checks). The host supervisor and guest binaries the driver
+# embeds are built from that revision too.
+openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "8d0797a52957195c2a6b64023819d0915b2ebaa9", default-features = false }
+openshell-isolation-interface = { git = "https://github.com/NVIDIA/OpenShell", rev = "8d0797a52957195c2a6b64023819d0915b2ebaa9" }
+openshell-sandbox-backend = { git = "https://github.com/NVIDIA/OpenShell", rev = "8d0797a52957195c2a6b64023819d0915b2ebaa9" }
+openshell-otel = { git = "https://github.com/NVIDIA/OpenShell", rev = "8d0797a52957195c2a6b64023819d0915b2ebaa9" }
+openshell-otel-test-support = { git = "https://github.com/NVIDIA/OpenShell", rev = "8d0797a52957195c2a6b64023819d0915b2ebaa9" }
+openshell-crypto = { git = "https://github.com/NVIDIA/OpenShell", rev = "8d0797a52957195c2a6b64023819d0915b2ebaa9", default-features = false, features = ["aws-lc"] }
 # Async runtime
 tokio = { version = "1.53.3", features = ["full"] }
 

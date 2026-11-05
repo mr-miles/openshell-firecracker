@@ -1,9 +1,22 @@
-# The VM driver: OpenShell's, vendored in vendor/openshell and trimmed to what the
-# Firecracker launcher needs (see vendor/openshell/crates/openshell-driver-vm/README.md).
+# The VM driver: OpenShell's openshell-driver-vm, vendored in vendor/openshell and trimmed
+# to what the Firecracker launcher needs (see
+# vendor/openshell/crates/openshell-driver-vm/README.md). Only that crate is vendored; the
+# other OpenShell crates it uses are git dependencies on the pinned commit.
 #
 # Checks (driver:ci) need only a Rust toolchain. Building a release driver also needs
 # the runtime artifacts it embeds (driver:stage): the host supervisor and guest
 # sandbox, built from the OpenShell revision in driver/UPSTREAM.env, and umoci.
+
+["driver:check-pin"]
+description = "Check that the git revision in vendor/openshell/Cargo.toml is the commit in driver/UPSTREAM.env"
+run = '''
+set -eu
+. driver/UPSTREAM.env
+revs="$(grep -o 'rev = "[0-9a-f]*"' vendor/openshell/Cargo.toml | sort -u)"
+test "$revs" = "rev = \"$OPENSHELL_COMMIT\"" \
+  || { echo "vendor/openshell/Cargo.toml pins: $revs; driver/UPSTREAM.env pins: $OPENSHELL_COMMIT" >&2; exit 1; }
+echo "pin ok: $OPENSHELL_COMMIT"
+'''
 
 ["driver:format:check"]
 description = "Check the vendored driver's formatting"
@@ -18,8 +31,8 @@ description = "Run the vendored driver's tests (no KVM needed)"
 run = "cd vendor/openshell && cargo test -p openshell-driver-vm"
 
 ["driver:ci"]
-description = "Everything CI checks for the vendored driver: format, lint, test"
-depends = ["driver:format:check", "driver:lint", "driver:test"]
+description = "Everything CI checks for the vendored driver: pin, format, lint, test"
+depends = ["driver:check-pin", "driver:format:check", "driver:lint", "driver:test"]
 
 ["driver:stage"]
 description = "Build the host supervisor and guest binaries, fetch umoci, into OPENSHELL_VM_RUNTIME_COMPRESSED_DIR"
@@ -51,7 +64,7 @@ run = '''
 set -eu
 mkdir -p dist
 tar -czf "dist/openshell-driver-vm-$(uname -m)-linux.tar.gz" \
-  -C vendor/openshell/target/release openshell-driver-vm
+  -C "${CARGO_TARGET_DIR:-vendor/openshell/target}/release" openshell-driver-vm
 # install.sh reads this to tell the operator which OpenShell revision to match.
 . driver/UPSTREAM.env
 printf '%s\n' "$OPENSHELL_COMMIT" > dist/openshell-commit.txt

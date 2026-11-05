@@ -219,6 +219,10 @@ const GUEST_IMAGE_OCI_REF: &str = "openshell";
 const IMAGE_EXPORT_ROOTFS_ARCHIVE: &str = "source-rootfs.tar";
 // Older registry cache entries were not bound to the downloaded manifest.
 const BOOTSTRAP_IMAGE_CACHE_LAYOUT_VERSION: &str = "sandbox-bootstrap-rootfs-ext4-v6";
+/// Lowest and highest UID a sandbox account may have. Root and the all-ones
+/// "no user" value are excluded.
+const MIN_SANDBOX_UID: u32 = 1;
+const MAX_SANDBOX_UID: u32 = u32::MAX - 1;
 /// Guest init variable naming the image's working directory.
 const GUEST_WORKDIR_ENV: &str = "OPENSHELL_VM_WORKDIR";
 // v5: a prepared image carries `image-config.json` (the image ENV and WORKDIR).
@@ -544,23 +548,19 @@ impl VmDriverConfig {
     }
 
     pub fn validate_sandbox_identity(&self) -> Result<(), String> {
-        let range = openshell_policy::MIN_SANDBOX_UID..=openshell_policy::MAX_SANDBOX_UID;
+        let range = MIN_SANDBOX_UID..=MAX_SANDBOX_UID;
         if let Some(uid) = self.sandbox_uid
             && !range.contains(&uid)
         {
             return Err(format!(
-                "sandbox_uid {uid} is outside the allowed range [{}, {}]",
-                openshell_policy::MIN_SANDBOX_UID,
-                openshell_policy::MAX_SANDBOX_UID,
+                "sandbox_uid {uid} is outside the allowed range [{MIN_SANDBOX_UID}, {MAX_SANDBOX_UID}]",
             ));
         }
         if let Some(gid) = self.sandbox_gid
             && !range.contains(&gid)
         {
             return Err(format!(
-                "sandbox_gid {gid} is outside the allowed range [{}, {}]",
-                openshell_policy::MIN_SANDBOX_UID,
-                openshell_policy::MAX_SANDBOX_UID,
+                "sandbox_gid {gid} is outside the allowed range [{MIN_SANDBOX_UID}, {MAX_SANDBOX_UID}]",
             ));
         }
         Ok(())
@@ -5287,7 +5287,7 @@ async fn connect_local_container_engine() -> Option<Docker> {
 }
 
 fn detect_podman_socket() -> Option<PathBuf> {
-    openshell_driver_podman::driver::detect_socket()
+    crate::podman_socket::detect_socket()
 }
 
 fn is_openshell_local_build_image_ref(image_ref: &str) -> bool {
@@ -6524,19 +6524,15 @@ async fn write_sandbox_owner_state(
 }
 
 fn validate_sandbox_owner_identity(uid: u32, gid: u32) -> Result<(), String> {
-    let range = openshell_policy::MIN_SANDBOX_UID..=openshell_policy::MAX_SANDBOX_UID;
+    let range = MIN_SANDBOX_UID..=MAX_SANDBOX_UID;
     if !range.contains(&uid) {
         return Err(format!(
-            "uid {uid} is outside the allowed range [{}, {}]",
-            openshell_policy::MIN_SANDBOX_UID,
-            openshell_policy::MAX_SANDBOX_UID
+            "uid {uid} is outside the allowed range [{MIN_SANDBOX_UID}, {MAX_SANDBOX_UID}]",
         ));
     }
     if !range.contains(&gid) {
         return Err(format!(
-            "gid {gid} is outside the allowed range [{}, {}]",
-            openshell_policy::MIN_SANDBOX_UID,
-            openshell_policy::MAX_SANDBOX_UID
+            "gid {gid} is outside the allowed range [{MIN_SANDBOX_UID}, {MAX_SANDBOX_UID}]",
         ));
     }
     Ok(())

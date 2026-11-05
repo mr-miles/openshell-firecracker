@@ -44,13 +44,16 @@ The guest has no network device.
 
 ## The vendored driver
 
-`vendor/openshell` holds the crates of OpenShell's VM driver and their dependencies, taken
-from NVIDIA/OpenShell commit `8d0797a` (pinned in [`driver/UPSTREAM.env`](driver/UPSTREAM.env)),
-as their own cargo workspace with upstream's lockfile. The changes from upstream are listed
-in [its README](vendor/openshell/crates/openshell-driver-vm/README.md): image `ENV` and
+`vendor/openshell` holds one crate: OpenShell's VM driver (`openshell-driver-vm`), taken from
+NVIDIA/OpenShell commit `8d0797a` (pinned in [`driver/UPSTREAM.env`](driver/UPSTREAM.env)) and
+trimmed. It is its own cargo workspace. The other OpenShell crates it uses (`openshell-core`
+and friends) are **git dependencies on the same commit**, not copies, so building needs
+network access to GitHub. The changes from upstream are listed in
+[its README](vendor/openshell/crates/openshell-driver-vm/README.md): image `ENV` and
 `WORKDIR`, `OPENSHELL_VM_LAUNCHER_BIN`, and the removal of everything Firecracker does not
-use. The host supervisor and guest sandbox binaries the driver embeds are not vendored: they
-are built from the same pinned commit when a release is made.
+use. The host supervisor and guest sandbox binaries the driver embeds are built from the same
+pinned commit when a release is made. `mise run driver:check-pin` fails if the revision in
+`vendor/openshell/Cargo.toml` and the one in `driver/UPSTREAM.env` differ.
 
 ### Compatibility
 
@@ -60,6 +63,24 @@ from a revision compatible with the one in `driver/UPSTREAM.env`. The vendored c
 (such as 0.1.x) has not been checked: until it is, run a gateway built from that commit
 or a later release known to match. `install.sh` prints the commit the installed driver
 was built from and the gateway's reported version, and leaves the comparison to you.
+
+**Trying another OpenShell version.** [`driver/update-pin.sh`](driver/update-pin.sh) moves the
+pin to a release tag and edits all three places it lives (`driver/UPSTREAM.env`, the `rev`s in
+`vendor/openshell/Cargo.toml`, and `Cargo.lock`), then type-checks the driver against it and
+summarises what changed upstream in the driver crate:
+
+```shell
+driver/update-pin.sh --list          # release tags; the current pin is marked
+driver/update-pin.sh --check         # exit 10 if a newer stable release exists
+driver/update-pin.sh                 # move to the newest stable release
+driver/update-pin.sh v0.1.8-pre.1    # or a specific tag, `latest-pre`, `main`, or a commit
+```
+
+Nothing is committed; `git checkout` the three files to undo. The vendored driver is a fork
+of the old revision, so a newer one may not build until the fork is re-synced with
+upstream's changes (the script prints them). At the time of writing the pinned commit
+`8d0797a` predates `v0.1.7`, which the vendored driver does not build against: upstream added
+fields to `SupervisorAuthBundle` and `DriverTracingConfig`.
 
 ### Image ENV and WORKDIR
 
