@@ -2314,7 +2314,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "openshell-core"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?rev=8d0797a52957195c2a6b64023819d0915b2ebaa9#8d0797a52957195c2a6b64023819d0915b2ebaa9"
+source = "git+https://github.com/NVIDIA/OpenShell?rev=5d25211b25a8fc887e8d5c606d57d6ab22f1d76c#5d25211b25a8fc887e8d5c606d57d6ab22f1d76c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2355,7 +2355,7 @@ dependencies = [
 [[package]]
 name = "openshell-crypto"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?rev=8d0797a52957195c2a6b64023819d0915b2ebaa9#8d0797a52957195c2a6b64023819d0915b2ebaa9"
+source = "git+https://github.com/NVIDIA/OpenShell?rev=5d25211b25a8fc887e8d5c606d57d6ab22f1d76c#5d25211b25a8fc887e8d5c606d57d6ab22f1d76c"
 dependencies = [
  "aws-lc-rs",
  "jsonwebtoken",
@@ -2417,7 +2417,7 @@ dependencies = [
 [[package]]
 name = "openshell-extension-core"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?rev=8d0797a52957195c2a6b64023819d0915b2ebaa9#8d0797a52957195c2a6b64023819d0915b2ebaa9"
+source = "git+https://github.com/NVIDIA/OpenShell?rev=5d25211b25a8fc887e8d5c606d57d6ab22f1d76c#5d25211b25a8fc887e8d5c606d57d6ab22f1d76c"
 dependencies = [
  "hyper-util",
  "serde",
@@ -2430,7 +2430,7 @@ dependencies = [
 [[package]]
 name = "openshell-isolation-interface"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?rev=8d0797a52957195c2a6b64023819d0915b2ebaa9#8d0797a52957195c2a6b64023819d0915b2ebaa9"
+source = "git+https://github.com/NVIDIA/OpenShell?rev=5d25211b25a8fc887e8d5c606d57d6ab22f1d76c#5d25211b25a8fc887e8d5c606d57d6ab22f1d76c"
 dependencies = [
  "openshell-core",
  "serde",
@@ -2442,7 +2442,7 @@ dependencies = [
 [[package]]
 name = "openshell-ocsf"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?rev=8d0797a52957195c2a6b64023819d0915b2ebaa9#8d0797a52957195c2a6b64023819d0915b2ebaa9"
+source = "git+https://github.com/NVIDIA/OpenShell?rev=5d25211b25a8fc887e8d5c606d57d6ab22f1d76c#5d25211b25a8fc887e8d5c606d57d6ab22f1d76c"
 dependencies = [
  "chrono",
  "serde",
@@ -2456,20 +2456,24 @@ dependencies = [
 [[package]]
 name = "openshell-otel"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?rev=8d0797a52957195c2a6b64023819d0915b2ebaa9#8d0797a52957195c2a6b64023819d0915b2ebaa9"
+source = "git+https://github.com/NVIDIA/OpenShell?rev=5d25211b25a8fc887e8d5c606d57d6ab22f1d76c#5d25211b25a8fc887e8d5c606d57d6ab22f1d76c"
 dependencies = [
  "async-trait",
  "bytes",
  "futures",
  "http",
  "http-body-util",
+ "hyper-rustls",
  "hyper-util",
  "metrics",
+ "openshell-crypto",
  "openshell-ocsf",
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "rustls",
+ "rustls-native-certs",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -2478,22 +2482,27 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
 name = "openshell-otel-test-support"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?rev=8d0797a52957195c2a6b64023819d0915b2ebaa9#8d0797a52957195c2a6b64023819d0915b2ebaa9"
+source = "git+https://github.com/NVIDIA/OpenShell?rev=5d25211b25a8fc887e8d5c606d57d6ab22f1d76c#5d25211b25a8fc887e8d5c606d57d6ab22f1d76c"
 dependencies = [
  "bytes",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "openshell-crypto",
  "openshell-otel",
  "opentelemetry-proto",
  "prost",
+ "rcgen",
+ "rustls",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tonic",
  "tracing",
@@ -2503,7 +2512,7 @@ dependencies = [
 [[package]]
 name = "openshell-policy-schema"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?rev=8d0797a52957195c2a6b64023819d0915b2ebaa9#8d0797a52957195c2a6b64023819d0915b2ebaa9"
+source = "git+https://github.com/NVIDIA/OpenShell?rev=5d25211b25a8fc887e8d5c606d57d6ab22f1d76c#5d25211b25a8fc887e8d5c606d57d6ab22f1d76c"
 dependencies = [
  "miette",
  "noyalib",
@@ -2516,7 +2525,7 @@ dependencies = [
 [[package]]
 name = "openshell-sandbox-backend"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?rev=8d0797a52957195c2a6b64023819d0915b2ebaa9#8d0797a52957195c2a6b64023819d0915b2ebaa9"
+source = "git+https://github.com/NVIDIA/OpenShell?rev=5d25211b25a8fc887e8d5c606d57d6ab22f1d76c#5d25211b25a8fc887e8d5c606d57d6ab22f1d76c"
 dependencies = [
  "async-trait",
  "bytes",

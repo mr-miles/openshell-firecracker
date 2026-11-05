@@ -45,7 +45,7 @@ The guest has no network device.
 ## The vendored driver
 
 `vendor/openshell` holds one crate: OpenShell's VM driver (`openshell-driver-vm`), taken from
-NVIDIA/OpenShell commit `8d0797a` (pinned in [`driver/UPSTREAM.env`](driver/UPSTREAM.env)) and
+NVIDIA/OpenShell release `v0.1.7` (commit `5d25211`, pinned in [`driver/UPSTREAM.env`](driver/UPSTREAM.env)) and
 trimmed. It is its own cargo workspace. The other OpenShell crates it uses (`openshell-core`
 and friends) are **git dependencies on the same commit**, not copies, so building needs
 network access to GitHub. The changes from upstream are listed in
@@ -58,11 +58,10 @@ pinned commit when a release is made. `mise run driver:check-pin` fails if the r
 ### Compatibility
 
 The supervisor protocol is not stable across OpenShell revisions, so the gateway must come
-from a revision compatible with the one in `driver/UPSTREAM.env`. The vendored commit is a
-`main` commit, not a release tag. Whether it is compatible with a given OpenShell release
-(such as 0.1.x) has not been checked: until it is, run a gateway built from that commit
-or a later release known to match. `install.sh` prints the commit the installed driver
-was built from and the gateway's reported version, and leaves the comparison to you.
+from a revision compatible with the one in `driver/UPSTREAM.env`, currently the `v0.1.7`
+release, so run a `v0.1.7` gateway. Other releases have not been checked. `install.sh` prints
+the commit the installed driver was built from and the gateway's reported version, and leaves
+the comparison to you.
 
 **Trying another OpenShell version.** [`driver/update-pin.sh`](driver/update-pin.sh) moves the
 pin to a release tag and edits all three places it lives (`driver/UPSTREAM.env`, the `rev`s in
@@ -77,10 +76,12 @@ driver/update-pin.sh v0.1.8-pre.1    # or a specific tag, `latest-pre`, `main`, 
 ```
 
 Nothing is committed; `git checkout` the three files to undo. The vendored driver is a fork
-of the old revision, so a newer one may not build until the fork is re-synced with
-upstream's changes (the script prints them). At the time of writing the pinned commit
-`8d0797a` predates `v0.1.7`, which the vendored driver does not build against: upstream added
-fields to `SupervisorAuthBundle` and `DriverTracingConfig`.
+of the revision it was taken from, so a newer one may not build until the fork is re-synced
+with upstream's changes (the script prints them). To re-sync, three-way merge each changed
+file: base is upstream at the old pin, ours is `vendor/openshell`, theirs is upstream at the
+new one (`git merge-file`). That is how the fork was moved from `8d0797a` to `v0.1.7`, which
+added fields to `SupervisorAuthBundle` and `DriverTracingConfig` and fixed guest directory
+permissions under a private umask.
 
 ### Image ENV and WORKDIR
 
@@ -446,7 +447,7 @@ first sandbox. If that happens, set `off` to confirm the cause and read
 |---|---|
 | Config builder, argument parsing, `check`, `cargo clippy` / `rustfmt`, CI | Unit tests pass and CI runs |
 | End to end on one real host | `openshell sandbox create` boots a Firecracker sandbox: the release-built Linux 6.18 guest kernel (with `# CONFIG_ACPI is not set`), the jail, image preparation, the gateway-to-driver socket and the supervisor connection all worked. Needed fixes along the way are in the git history (`/dev/fd` links, `gateway.toml` schema version and socket path) |
-| Vendored driver | **Not booted.** The end-to-end result above was with OpenShell's v0.1.6 driver plus a launcher-override patch, before the driver was vendored. The vendored driver (commit `8d0797a`, with `ENV`/`WORKDIR` and the removals) passes its unit tests and builds, but has not run a sandbox. The release packaging (`driver:package`, `driver/stage-runtime.sh`) has not been run end to end either: only its source fetch and umoci download were checked |
+| Vendored driver | **Not booted.** The end-to-end result above was with OpenShell's v0.1.6 driver plus a launcher-override patch, before the driver was vendored. The vendored driver (`v0.1.7`, with `ENV`/`WORKDIR` and the removals) passes its unit tests and builds, but has not run a sandbox. The release packaging (`driver:package`, `driver/stage-runtime.sh`) has not been run end to end either: only its source fetch and umoci download were checked |
 | Not checked on that host | The sub-uid isolation path (`OPENSHELL_VM_FIRECRACKER_SUBUIDS`), the AppArmor profile in `install.sh`, the guest clock, long-running or concurrent sandboxes, image `ENV`/`WORKDIR` in a real guest, and OpenShell's conformance suite (`tests/suites/conformance` in the OpenShell repository), which is what would show parity with other drivers |
 | Other hosts | One Ubuntu-style x86_64 host only; no arm64 |
 

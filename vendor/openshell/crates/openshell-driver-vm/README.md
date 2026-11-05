@@ -1,9 +1,9 @@
 # openshell-driver-vm (vendored)
 
 This is a trimmed copy of OpenShell's VM compute driver, taken from NVIDIA/OpenShell
-commit `8d0797a`, for use with the Firecracker launcher in the repository root. Only this
-crate is copied; the OpenShell crates it depends on are git dependencies on the same commit
-(declared once, in the workspace `Cargo.toml`). It is the
+at the revision in `driver/UPSTREAM.env` in the repository root, for use with the Firecracker
+launcher there. Only this crate is copied; the OpenShell crates it depends on are git
+dependencies on the same revision (declared once, in the workspace `Cargo.toml`). It is the
 control plane only: gRPC, images, overlays, launch authentication, the host supervisor and
 the lifecycle-extension hooks. It starts no VMM itself; every VM is booted by the launcher
 named in `OPENSHELL_VM_LAUNCHER_BIN`.
