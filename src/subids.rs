@@ -338,6 +338,17 @@ mod tests {
         let first = acquire(&lease_dir, 1).unwrap();
         assert!(acquire(&lease_dir, 1).is_err());
         drop(first);
-        assert_eq!(acquire(&lease_dir, 1).unwrap().offset, 0);
+        // Tests run in parallel, and a sibling test may be between `fork` and
+        // `exec` holding a copy of the descriptor, which keeps the flock until
+        // the exec closes it. That is momentary, so allow for it.
+        let mut again = acquire(&lease_dir, 1);
+        for _ in 0..200 {
+            if again.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            again = acquire(&lease_dir, 1);
+        }
+        assert_eq!(again.unwrap().offset, 0);
     }
 }

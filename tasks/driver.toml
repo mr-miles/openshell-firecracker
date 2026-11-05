@@ -48,11 +48,14 @@ mise exec zig@0.14.1 "github:rust-cross/cargo-zigbuild@0.22.3" -- bash driver/st
 '''
 
 ["driver:build"]
-description = "Build the release driver with the staged runtime embedded"
+description = "Build the release driver with the staged runtime embedded, reporting this plugin's version"
 depends = ["driver:stage"]
 run = '''
 set -eu
 dir="${OPENSHELL_DIR:-$PWD/openshell}"
+# The version the driver declares to the gateway: this plugin's release version (the v*
+# tag being built, else a development version derived from the latest tag).
+OPENSHELL_DRIVER_VERSION="$(bash driver/version.sh)" \
 OPENSHELL_VM_RUNTIME_COMPRESSED_DIR="${OPENSHELL_VM_RUNTIME_COMPRESSED_DIR:-$dir/target/vm-runtime-compressed}" \
   cargo build --release --manifest-path vendor/openshell/Cargo.toml -p openshell-driver-vm --bin openshell-driver-vm
 '''

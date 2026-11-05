@@ -32,6 +32,7 @@ mod podman_socket;
 pub mod procguard;
 #[cfg(feature = "compute-driver")]
 mod rootfs;
+mod version;
 
 #[cfg(feature = "compute-driver")]
 pub use driver::{VmDriver, VmDriverConfig};
@@ -41,3 +42,4 @@ pub use lifecycle::{
     LifecycleError, LifecycleExtension, LifecycleExtensionRegistry, LifecycleResult,
     RestoreContext,
 };
+pub use version::VERSION;
