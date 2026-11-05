@@ -27,8 +27,13 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
 
     let Ok(dir) = env::var("OPENSHELL_VM_RUNTIME_COMPRESSED_DIR") else {
-        println!("cargo:warning=OPENSHELL_VM_RUNTIME_COMPRESSED_DIR not set");
-        println!("cargo:warning=Stage the compressed runtime artifacts and point it at them");
+        // Lint, check and test builds (the debug profile) never run the embedded
+        // binaries, so empty stand-ins are expected and need no warning. A release
+        // build without them is a driver that cannot prepare an image.
+        if env::var("PROFILE").is_ok_and(|profile| profile == "release") {
+            println!("cargo:warning=OPENSHELL_VM_RUNTIME_COMPRESSED_DIR not set");
+            println!("cargo:warning=Stage the compressed runtime artifacts and point it at them");
+        }
         generate_stub_resources(&out_dir);
         return;
     };
