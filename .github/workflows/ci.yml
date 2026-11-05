@@ -37,6 +37,26 @@ jobs:
       - name: Unit tests
         run: mise run rust:test
 
+  # The vendored VM driver (vendor/openshell): its own workspace and lockfile. This
+  # checks the driver crate only; the release workflow builds it with the runtime
+  # embedded.
+  driver:
+    name: Driver format, lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            vendor/openshell/target
+          key: driver-${{ runner.os }}-${{ hashFiles('vendor/openshell/Cargo.lock', 'mise.toml') }}
+          restore-keys: driver-${{ runner.os }}-
+      - name: rustfmt, clippy, tests
+        run: mise run driver:ci
+
   build:
     name: Build release binary
     runs-on: ubuntu-latest

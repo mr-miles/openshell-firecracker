@@ -2,10 +2,9 @@
 
 //! Boot one sandbox VM under Firecracker and wait for it to end.
 //!
-//! This is the stock VM driver's `--internal-run-vm`, for Firecracker. The
-//! driver gives it the same flags it gives its libkrun launcher; the Firecracker
-//! binary, guest kernel and sub-uid mode come from the environment the driver
-//! inherited from its service unit (see [`HostConfig`]).
+//! This is the VM driver's `--internal-run-vm`. The Firecracker binary, guest
+//! kernel and sub-uid mode come from the environment the driver inherited from
+//! its service unit (see [`HostConfig`]).
 //!
 //! The launcher writes the guest environment into the overlay disk, opens a
 //! bridge from Firecracker's vsock socket to the supervisor, and starts the VMM
@@ -240,17 +239,8 @@ pub fn run(args: &LauncherArgs) -> Result<(), String> {
     let overlay = required(&args.vm_overlay_disk, "--vm-overlay-disk")?;
     let init_path = required(&args.vm_exec, "--vm-exec")?;
     let console_output = required(&args.vm_console_output, "--vm-console-output")?;
-    let kernel: &Path = args
-        .vm_kernel_image
-        .as_deref()
-        .unwrap_or(host.kernel.as_path());
+    let kernel: &Path = host.kernel.as_path();
 
-    if args.vm_gpu_bdf.is_some() {
-        return Err("GPU passthrough is not supported by the Firecracker launcher".to_string());
-    }
-    if !args.vm_mount.is_empty() {
-        return Err("virtiofs mounts are not supported by the Firecracker launcher".to_string());
-    }
     if args.vm_vsock_control_port.is_some() != args.vm_vsock_control_socket.is_some() {
         return Err(
             "--vm-vsock-control-port and --vm-vsock-control-socket must be set together"
@@ -271,7 +261,7 @@ pub fn run(args: &LauncherArgs) -> Result<(), String> {
         .ok_or("console output path has no parent directory")?;
     let sub = resolve_subuid(&host)?.map(|(ids, lease)| SubUid { ids, lease });
 
-    // Firecracker has no exec/env injection like libkrun: the guest init
+    // Firecracker has no exec/env injection: the guest init
     // sources its environment from the overlay, as with the QEMU backend.
     let env = envfile::render(&args.vm_env, host_epoch_secs())?;
     envfile::write_into_overlay(overlay, &env)?;

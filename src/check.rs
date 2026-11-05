@@ -16,7 +16,7 @@ use std::process::Command;
 
 use crate::config::{MIN_FIRECRACKER_VERSION, parse_firecracker_version};
 use crate::confine;
-use crate::delegate::STOCK_DRIVER_ENV;
+use crate::delegate::DRIVER_ENV;
 use crate::launcher::ENV_SUBUIDS;
 use crate::locate::{self, Search};
 use crate::subids::{self, SubuidMode};
@@ -258,10 +258,10 @@ fn check_openshell(launcher: &Path, out: &mut Vec<Finding>) {
     }
 
     // The driver that will run this launcher.
-    let stock_override = std::env::var_os(STOCK_DRIVER_ENV);
+    let driver_override = std::env::var_os(DRIVER_ENV);
     let driver = locate::locate(&Search {
-        env_name: Some(STOCK_DRIVER_ENV),
-        env_value: stock_override.as_deref().filter(|value| !value.is_empty()),
+        env_name: Some(DRIVER_ENV),
+        env_value: driver_override.as_deref().filter(|value| !value.is_empty()),
         file_name: "openshell-driver-vm",
         beside: launcher.parent(),
         path_var: path_var.as_deref(),
@@ -269,8 +269,7 @@ fn check_openshell(launcher: &Path, out: &mut Vec<Finding>) {
     });
     match driver {
         Err(error) => out.push(Finding::Fail(format!(
-            "OpenShell's VM driver was not found ({error}). install.sh installs one next to \
-             the launcher"
+            "the VM driver was not found ({error}). install.sh installs one next to the launcher"
         ))),
         Ok(found) => match run_output(&found.path, "--help") {
             None => out.push(Finding::Fail(format!(
@@ -282,9 +281,8 @@ fn check_openshell(launcher: &Path, out: &mut Vec<Finding>) {
                 found.path.display()
             ))),
             Some(_) => out.push(Finding::Fail(format!(
-                "the VM driver {} cannot use a different launcher (no {LAUNCHER_ENV}), so it \
-                 would boot libkrun instead. Use the interim driver install.sh installs, or an \
-                 OpenShell release that has the option",
+                "{} is not this plugin's VM driver (it has no {LAUNCHER_ENV} option). Use the \
+                 driver install.sh installs",
                 found.path.display()
             ))),
         },
@@ -295,8 +293,8 @@ fn check_openshell(launcher: &Path, out: &mut Vec<Finding>) {
     let from_file = driver_env_file_value(LAUNCHER_ENV);
     match from_file.or_else(|| env_text(LAUNCHER_ENV)) {
         None => out.push(Finding::Fail(format!(
-            "{LAUNCHER_ENV} is not set in the driver's environment file ({}) or this shell, so the driver would boot libkrun VMs instead of Firecracker. The \
-             driver has no default for it: set it in that file",
+            "{LAUNCHER_ENV} is not set in the driver's environment file ({}) or this shell, so the driver cannot start any VM. \
+             It has no default: set it in that file",
             driver_env_file().map_or("unknown".to_string(), |p| p.display().to_string())
         ))),
         Some(value) => {

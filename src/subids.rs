@@ -9,7 +9,7 @@
 //! A VMM that escapes the jail holds a uid that owns nothing on the host and
 //! cannot signal the driver or another VMM.
 //!
-//! Every VM has its own launcher process and the stock driver cannot hand one
+//! Every VM has its own launcher process and the driver cannot hand one
 //! an id, so launchers coordinate through lock files: a launcher holds an
 //! exclusive `flock` on `lease-<n>` for as long as it runs. The kernel drops the
 //! lock when the launcher exits for any reason, so a crash cannot leak an id.

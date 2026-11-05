@@ -2,10 +2,9 @@
 
 //! Bridge from Firecracker's vsock socket to the host supervisor.
 //!
-//! The stock driver tells its launcher where the supervisor listens
+//! The driver tells its launcher where the supervisor listens
 //! (`--vm-vsock-control-socket`) and expects the guest's connections to host
-//! port `--vm-vsock-control-port` to arrive there, as libkrun maps them.
-//! Firecracker instead connects to `<uds_path>_<port>` for each such
+//! port `--vm-vsock-control-port` to arrive there. Firecracker connects to `<uds_path>_<port>` for each such
 //! connection. The launcher listens on that path and relays every connection
 //! to the supervisor.
 //!
