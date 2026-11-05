@@ -46,6 +46,18 @@ fi
 [ "$(git -C "$dir" rev-parse HEAD)" = "$OPENSHELL_COMMIT" ] \
     || { echo "stage-runtime: checkout is not at $OPENSHELL_COMMIT" >&2; exit 1; }
 
+# The binaries built below take their version from the release tag at HEAD (OpenShell's
+# build script reads `git tag --points-at HEAD`); a tagless checkout would report a
+# development version such as 0.0.1-dev.1+g<sha>. So fetch the pinned tag, and refuse a
+# tag that no longer points at the pinned commit.
+if [ -n "${OPENSHELL_TAG:-}" ]; then
+    if ! git -C "$dir" rev-parse -q --verify "refs/tags/$OPENSHELL_TAG^{commit}" >/dev/null; then
+        git -C "$dir" fetch -q --depth 1 origin "refs/tags/$OPENSHELL_TAG:refs/tags/$OPENSHELL_TAG"
+    fi
+    [ "$(git -C "$dir" rev-parse "refs/tags/$OPENSHELL_TAG^{commit}")" = "$OPENSHELL_COMMIT" ] \
+        || { echo "stage-runtime: tag $OPENSHELL_TAG no longer points at $OPENSHELL_COMMIT" >&2; exit 1; }
+fi
+
 # --- supervisor, guest sandbox, guest init -----------------------------------------
 echo "==> Building the supervisor bundle"
 OPENSHELL_VM_RUNTIME_COMPRESSED_DIR="$out" "$dir/tasks/scripts/vm/build-supervisor-bundle.sh"

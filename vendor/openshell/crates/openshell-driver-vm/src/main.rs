@@ -4,9 +4,9 @@
 use clap::Parser;
 use futures::Stream;
 use miette::{IntoDiagnostic, Result};
-use openshell_core::VERSION;
 use openshell_core::proto::compute::v1::compute_driver_server::ComputeDriverServer;
 use openshell_core::sandbox_env::SupervisorOtlpArgs;
+use openshell_driver_vm::VERSION;
 use openshell_driver_vm::{VmDriver, VmDriverConfig, procguard};
 use std::io;
 use std::net::SocketAddr;

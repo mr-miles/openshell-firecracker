@@ -1491,7 +1491,7 @@ impl VmDriver {
         let mut extension = openshell_core::extension_protocol::extension_metadata(
             openshell_core::extension_protocol::ExtensionFamily::Compute,
             "openshell/vm",
-            openshell_core::VERSION,
+            crate::VERSION,
             [],
         );
         extension
@@ -1504,7 +1504,7 @@ impl VmDriver {
             }
             .acknowledgement(),
             driver_name: DRIVER_NAME.to_string(),
-            driver_version: openshell_core::VERSION.to_string(),
+            driver_version: crate::VERSION.to_string(),
             default_image: self.config.default_image.clone(),
             gateway_manages_lifecycle: true,
             supports_sandbox_authentication: false,
@@ -6706,7 +6706,7 @@ fn bootstrap_image_cache_identity(image_identity: &str) -> String {
     let image_identity = compute_bytes_sha256_hex(image_identity.as_bytes());
     format!(
         "{BOOTSTRAP_IMAGE_CACHE_LAYOUT_VERSION}:openshell-{}:guest-{}:{image_identity}",
-        openshell_core::VERSION,
+        crate::VERSION,
         sandbox_guest_runtime_identity()
     )
 }
@@ -6726,7 +6726,7 @@ fn prepared_image_cache_identity(image_identity: &str, config: &VmDriverConfig) 
     );
     format!(
         "{PREPARED_IMAGE_CACHE_LAYOUT_VERSION}:openshell-{}:{identity}:{image_identity}",
-        openshell_core::VERSION
+        crate::VERSION
     )
 }
 
@@ -12094,7 +12094,7 @@ mod tests {
             image_account,
             format!(
                 "sandbox-prepared-rootfs-ext4-umoci-v5:openshell-{}:image-account:{image_hash}",
-                openshell_core::VERSION
+                crate::VERSION
             )
         );
 
@@ -12136,7 +12136,7 @@ mod tests {
         let identity = bootstrap_image_cache_identity("sha256:bootstrap-image");
         assert!(identity.starts_with(&format!(
             "sandbox-bootstrap-rootfs-ext4-v6:openshell-{}:guest-",
-            openshell_core::VERSION
+            crate::VERSION
         )));
         assert!(identity.ends_with(&compute_bytes_sha256_hex(b"sha256:bootstrap-image")));
         assert!(identity.contains(&sandbox_guest_runtime_identity()));
@@ -13175,6 +13175,20 @@ while :; do sleep 0.05; done"#,
                 "template.driver_config.vm must reject '{key}'"
             );
         }
+    }
+
+    #[test]
+    fn capabilities_declare_the_driver_version() {
+        let driver = test_driver_with_extensions(LifecycleExtensionRegistry::new());
+        let capabilities = driver.capabilities();
+        assert_eq!(capabilities.driver_version, crate::VERSION);
+        assert_eq!(
+            capabilities
+                .extension
+                .expect("extension metadata")
+                .implementation_version,
+            crate::VERSION
+        );
     }
 
     #[test]

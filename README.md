@@ -83,6 +83,17 @@ new one (`git merge-file`). That is how the fork was moved from `8d0797a` to `v0
 added fields to `SupervisorAuthBundle` and `DriverTracingConfig` and fixed guest directory
 permissions under a private umask.
 
+### Version
+
+The driver declares the plugin's own release version to the gateway (in `driver_version` and
+the extension metadata), and prints it for `--version`: `0.1.0` for a `v0.1.0` tag, and
+`0.1.0-dev.3+g1a2b3c4d5` three commits after it. [`driver/version.sh`](driver/version.sh)
+works it out and `mise run driver:build` passes it to the build, so a release workflow run
+for a tag needs nothing more. A plain `cargo build` has no such setting and reports the
+development version `openshell-core` computes (such as `0.0.1-dev.1934+g5d25211b2`), which
+never names a release. The OpenShell revision the driver was built from is in
+`openshell-commit.txt` and in the log line `install.sh` prints.
+
 ### Image ENV and WORKDIR
 
 OpenShell's driver unpacks an image into a disk and ignored the image's `Config.Env` and

@@ -326,7 +326,8 @@ warn_if_gateway_differs() {
 }
 
 # Install $1 as $2 with mode $3, never overwriting a file that differs: write
-# $2.new beside it instead.
+# $2.new beside it instead. Nothing is written when $2 already matches, or when
+# $2.new already holds this version (a repeat run), so reruns leave files alone.
 place() {
     local src="$1" dest="$2" mode="$3"
     local own=()
@@ -346,6 +347,8 @@ place() {
         say "installed $dest"
     elif cmp -s "$src" "$dest"; then
         say "unchanged $dest"
+    elif [ -e "$dest.new" ] && cmp -s "$src" "$dest.new"; then
+        say "unchanged $dest.new (your $dest differs from this version)"
     else
         install -m "$mode" ${own[@]+"${own[@]}"} "$src" "$dest.new"
         say "kept your $dest; the new version is $dest.new"
