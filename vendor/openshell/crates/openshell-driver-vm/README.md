@@ -18,6 +18,13 @@ Changes from upstream:
   image with no `WORKDIR` starts in `/` and the driver warns, unless
   `OPENSHELL_VM_DEFAULT_WORKDIR` supplies one. See `src/image_config.rs`.
 - **Launcher option.** `OPENSHELL_VM_LAUNCHER_BIN` selects the launcher executable.
+- **Supervisor identity** (off by default, `OPENSHELL_VM_SUPERVISOR_IDENTITY`). The driver
+  serves the JWT half of the SPIFFE Workload API on a socket in each sandbox's state
+  directory, starts the host supervisor from a hard link of its binary there, passes the
+  socket in `OPENSHELL_PROVIDER_SPIFFE_WORKLOAD_API_SOCKET`, and issues JWT-SVIDs only to
+  that attested process. It serves OIDC discovery and JWKS endpoints over HTTP. The server
+  stub is generated in `build.rs` without `protoc`. See `src/supervisor_identity/` and
+  "Supervisor identity" in the repository README.
 - **Removed.** libkrun and its embedded runtime, QEMU, GPU passthrough and `openshell-vfio`,
   virtiofs bind mounts, and the backend negotiation in the lifecycle extension API. A
   sandbox that asks for a GPU or bind mounts is rejected.

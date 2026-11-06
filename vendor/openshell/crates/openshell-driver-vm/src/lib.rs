@@ -32,6 +32,8 @@ mod podman_socket;
 pub mod procguard;
 #[cfg(feature = "compute-driver")]
 mod rootfs;
+#[cfg(feature = "compute-driver")]
+pub mod supervisor_identity;
 mod version;
 
 #[cfg(feature = "compute-driver")]

@@ -10,9 +10,11 @@ which the gateway does not start or supervise. The service is OpenShell's VM dri
 the launcher (`src/`) is the program it runs to boot each VM. It is a Firecracker-only
 driver: libkrun, QEMU, GPU passthrough and virtiofs bind mounts are not part of it.
 
-It also differs from OpenShell's driver in one behavior: a sandbox starts the way a
+It also differs from OpenShell's driver in two behaviors: a sandbox starts the way a
 container does, with the image's `ENV` and in the image's `WORKDIR`
-([Image ENV and WORKDIR](#image-env-and-workdir)).
+([Image ENV and WORKDIR](#image-env-and-workdir)); and, if enabled, the driver issues
+SPIFFE JWT-SVIDs to its host supervisors itself, without a SPIRE agent
+([Supervisor identity](#supervisor-identity)).
 
 > Status: unit-tested, but the vendored driver has not yet been booted against a real VM.
 > See [Verification status](#verification-status).
@@ -389,6 +391,8 @@ driver inherits:
 
 The driver's `OPENSHELL_VM_DEFAULT_WORKDIR` (optional) sets the working directory for
 sandboxes whose image has none ([Image ENV and WORKDIR](#image-env-and-workdir)).
+The driver's `OPENSHELL_VM_SUPERVISOR_IDENTITY*` options (optional, off by default) are in
+[Supervisor identity](#supervisor-identity).
 
 The driver itself needs `OPENSHELL_GRPC_ENDPOINT` (required), `OPENSHELL_VM_TLS_CA` for an
 `https://` endpoint, `OPENSHELL_VM_DRIVER_STATE_DIR`, at least one of
@@ -426,6 +430,75 @@ The startup check does not exercise a boot, so a host that passes it can still f
 first sandbox. If that happens, set `off` to confirm the cause and read
 `rootfs-console.log`.
 
+## Supervisor identity
+
+Off by default. When it is on, the driver acts as a minimal SPIFFE Workload API for its
+host supervisors, so provider token grants (`OAuth2` JWT client assertions) work without a
+SPIRE agent. The supervisor needs no changes: it already reads
+`OPENSHELL_PROVIDER_SPIFFE_WORKLOAD_API_SOCKET` and calls `FetchJWTSVID` on it.
+
+For every sandbox launch the driver:
+
+1. hard-links the supervisor binary into the sandbox's state directory as
+   `openshell-supervisor` (or copies it, if a hard link is impossible: another filesystem,
+   or `fs.protected_hardlinks` with a binary owned by someone else), and starts the
+   supervisor from that link;
+2. binds `workload-api.sock` (mode `0600`) beside it and passes its path in
+   `OPENSHELL_PROVIDER_SPIFFE_WORKLOAD_API_SOCKET`;
+3. answers on that socket only the process it started. Every request is checked through
+   the connection's `SO_PEERCRED`: the peer runs as the driver's uid, has the
+   supervisor's pid and the process start time recorded at spawn (so a recycled pid
+   fails), and its `/proc/<pid>/exe` is this sandbox's link and has the link's inode. The
+   link shares its inode with the shared binary, so the path is what tells one sandbox's
+   supervisor from another's. A refused request gets `PermissionDenied` and the driver
+   logs why.
+
+The supervisor gets the SPIFFE ID `spiffe://<trust domain>/openshell/sandbox/<sandbox id>`,
+in a JWT-SVID signed with ES256. `FetchJWTBundles` and `ValidateJWTSVID` work too; the
+X.509 calls answer `Unimplemented`. Requests must carry `workload.spiffe.io: true`, as the
+specification requires. The socket and the link are removed when the supervisor stops.
+
+Relying parties verify the tokens with two HTTP endpoints, served on
+`OPENSHELL_VM_SUPERVISOR_IDENTITY_JWKS_BIND`:
+
+| Path | Content |
+|---|---|
+| `/.well-known/openid-configuration` | OIDC discovery document: `issuer`, `jwks_uri` |
+| `/.well-known/jwks.json` | The public signing key as a JWKS (`kid` is its RFC 7638 thumbprint) |
+
+They are plain HTTP and are served at the root. To publish them as an `https://` issuer,
+put a TLS reverse proxy in front, set `OPENSHELL_VM_SUPERVISOR_IDENTITY_ISSUER` to the
+public URL, and have the proxy strip the issuer's path, if it has one.
+
+The signing key (P-256, PKCS#8) is created on first start as
+`<state dir>/supervisor-identity/jwt-signing-key.p8`, mode `0600`. The driver refuses a
+key that group or others can read. It does not rotate the key: to rotate, stop the
+driver, delete the file and start it again. Tokens signed with the old key stop
+verifying once relying parties refetch the JWKS.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENSHELL_VM_SUPERVISOR_IDENTITY` | `false` | Turn the feature on |
+| `OPENSHELL_VM_SUPERVISOR_IDENTITY_TRUST_DOMAIN` | `openshell.local` | Trust domain of issued IDs (`[a-z0-9._-]`) |
+| `OPENSHELL_VM_SUPERVISOR_IDENTITY_ISSUER` | `http://<jwks bind>` | The `iss` claim and OIDC issuer: the URL relying parties fetch the JWKS from. Required when the bind address is `0.0.0.0` or `::` |
+| `OPENSHELL_VM_SUPERVISOR_IDENTITY_JWKS_BIND` | `127.0.0.1:8961` | Listen address of the HTTP endpoints |
+| `OPENSHELL_VM_SUPERVISOR_IDENTITY_SVID_TTL_SECS` | `300` | JWT-SVID lifetime, 60 to 3600 seconds |
+
+With it off, none of this exists: no HTTP listener, no signing key, no socket or link in
+the state directory (any a previous launch with it on left behind is removed at the
+next launch), and no variable in the supervisor's environment.
+
+Limits:
+
+- A UNIX socket path holds at most 107 bytes. The driver refuses to start if
+  `<state dir>/sandboxes/<36-character id>/workload-api.sock` is longer, so keep
+  `OPENSHELL_VM_DRIVER_STATE_DIR` short (under about 50 bytes); a longer sandbox id fails
+  that sandbox's launch.
+- The JWKS listener is unauthenticated: it publishes only the public key, but bind it
+  to an address only relying parties can reach.
+- This is not SPIRE. There is one trust domain, no federation, no X.509 SVIDs, and the
+  attestation knows only the supervisor processes this driver started.
+
 ## What does not work
 
 - No virtiofs bind mounts and no GPU passthrough on Firecracker. A sandbox that asks for
@@ -459,6 +532,7 @@ first sandbox. If that happens, set `off` to confirm the cause and read
 | Config builder, argument parsing, `check`, `cargo clippy` / `rustfmt`, CI | Unit tests pass and CI runs |
 | End to end on one real host | `openshell sandbox create` boots a Firecracker sandbox: the release-built Linux 6.18 guest kernel (with `# CONFIG_ACPI is not set`), the jail, image preparation, the gateway-to-driver socket and the supervisor connection all worked. Needed fixes along the way are in the git history (`/dev/fd` links, `gateway.toml` schema version and socket path) |
 | Vendored driver | **Not booted.** The end-to-end result above was with OpenShell's v0.1.6 driver plus a launcher-override patch, before the driver was vendored. The vendored driver (`v0.1.7`, with `ENV`/`WORKDIR` and the removals) passes its unit tests and builds, but has not run a sandbox. The release packaging (`driver:package`, `driver/stage-runtime.sh`) has not been run end to end either: only its source fetch and umoci download were checked |
+| Supervisor identity | Unit tests, including one that starts a stand-in supervisor from the hard link and has it fetch, verify and validate a JWT-SVID over the socket with the `spiffe` client the real supervisor uses, and a driver smoke test of the JWKS endpoints. Not run with a real supervisor or token service |
 | Not checked on that host | The sub-uid isolation path (`OPENSHELL_VM_FIRECRACKER_SUBUIDS`), the AppArmor profile in `install.sh`, the guest clock, long-running or concurrent sandboxes, image `ENV`/`WORKDIR` in a real guest, and OpenShell's conformance suite (`tests/suites/conformance` in the OpenShell repository), which is what would show parity with other drivers |
 | Other hosts | One Ubuntu-style x86_64 host only; no arm64 |
 
