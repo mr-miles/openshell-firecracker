@@ -382,6 +382,11 @@ pub struct VmDriverConfig {
     /// as a container does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_workdir: Option<String>,
+
+    /// Driver-issued SPIFFE JWT-SVIDs for host supervisors (not in upstream).
+    /// Disabled by default.
+    #[serde(default)]
+    pub supervisor_identity: crate::supervisor_identity::SupervisorIdentityConfig,
 }
 
 /// Redacting `Debug` so a proxy URL or credential path never reaches a log.
@@ -446,6 +451,7 @@ impl std::fmt::Debug for VmDriverConfig {
             .field("rootfs_tar_staging_dir", &self.rootfs_tar_staging_dir)
             .field("rootfs_tar_max_bytes", &self.rootfs_tar_max_bytes)
             .field("default_workdir", &self.default_workdir)
+            .field("supervisor_identity", &self.supervisor_identity)
             .finish()
     }
 }
@@ -487,6 +493,7 @@ impl Default for VmDriverConfig {
             rootfs_tar_staging_dir: None,
             rootfs_tar_max_bytes: None,
             default_workdir: None,
+            supervisor_identity: crate::supervisor_identity::SupervisorIdentityConfig::default(),
         }
     }
 }
@@ -1003,11 +1010,20 @@ fn host_control_openshell_endpoint(endpoint: &str) -> Result<(String, Option<Str
     Ok((url.into(), Some(host)))
 }
 
+/// A started host supervisor and what lives exactly as long as it.
+struct HostSupervisor {
+    child: Child,
+    liveness: Option<fs::File>,
+    supervisor_identity: Option<crate::supervisor_identity::SandboxEndpoint>,
+}
+
 #[derive(Debug)]
 struct VmProcess {
     child: Child,
     supervisor: Child,
     supervisor_liveness: Option<fs::File>,
+    /// This sandbox's Workload API, while supervisor identity is enabled.
+    supervisor_identity: Option<crate::supervisor_identity::SandboxEndpoint>,
     deleting: bool,
 }
 
@@ -1106,6 +1122,8 @@ pub struct VmDriver {
     preparation_root: Option<PathBuf>,
     events: broadcast::Sender<WatchSandboxesEvent>,
     lifecycle_extensions: Arc<LifecycleExtensionRegistry>,
+    /// The JWT-SVID issuer, while supervisor identity is enabled.
+    supervisor_identity: Option<Arc<crate::supervisor_identity::SupervisorIdentity>>,
 }
 
 impl VmDriver {
@@ -1176,6 +1194,21 @@ impl VmDriver {
             ));
         }
 
+        let supervisor_identity = if config.supervisor_identity.enabled {
+            // A sandbox id is a 36-character UUID from the gateway; check the
+            // socket path such an id gives fits before accepting sandboxes.
+            let sample_socket = sandboxes_root_dir(&config.state_dir)
+                .join("0".repeat(36))
+                .join(crate::supervisor_identity::SOCKET_FILE);
+            Some(crate::supervisor_identity::SupervisorIdentity::load(
+                &config.supervisor_identity,
+                &config.state_dir,
+                &sample_socket,
+            )?)
+        } else {
+            None
+        };
+
         let (socket_root, socket_root_fd) = allocate_socket_root()
             .map_err(|err| format!("failed to allocate socket root in /tmp: {err}"))?;
 
@@ -1190,11 +1223,20 @@ impl VmDriver {
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(lifecycle_extensions),
+            supervisor_identity,
         };
         preparation::reconcile(&image_cache_root_dir(&driver.config.state_dir))
             .map_err(|error| format!("reconcile image preparation staging: {error}"))?;
         driver.restore_persisted_sandboxes().await;
         Ok(driver)
+    }
+
+    /// The JWT-SVID issuer, if supervisor identity is enabled. The caller
+    /// serves its JWKS endpoints ([`crate::supervisor_identity::SupervisorIdentity::serve_jwks`]).
+    pub fn supervisor_identity(
+        &self,
+    ) -> Option<Arc<crate::supervisor_identity::SupervisorIdentity>> {
+        self.supervisor_identity.clone()
     }
 
     async fn validate_rootfs_tar_path(&self, raw: &Path) -> Result<PathBuf, Status> {
@@ -1322,7 +1364,7 @@ impl VmDriver {
         auth_bundle: &openshell_core::jwt::SupervisorAuthBundle,
         sandbox_owner: SandboxOwnerIdentity,
         workdir: Option<&str>,
-    ) -> Result<(Child, Option<fs::File>), Status> {
+    ) -> Result<HostSupervisor, Status> {
         // The destination CA is staged on the host before either resolving
         // the supervisor binary or spawning it. It never crosses into a VM
         // disk or a guest environment.
@@ -1333,6 +1375,21 @@ impl VmDriver {
         )
         .map_err(Status::internal)?;
         let supervisor_binary = self.host_supervisor_binary().await?;
+        // Supervisor identity: the supervisor runs from a hard link in its
+        // state directory, beside its Workload API socket. Disabled, neither
+        // exists, including any a launch with it enabled left behind.
+        crate::supervisor_identity::remove_sandbox_artifacts(state_dir);
+        let prepared_identity = self
+            .supervisor_identity
+            .as_ref()
+            .map(|identity| identity.prepare_sandbox(state_dir, &supervisor_binary))
+            .transpose()
+            .map_err(Status::failed_precondition)?;
+        let supervisor_program = prepared_identity
+            .as_ref()
+            .map_or(supervisor_binary.as_path(), |prepared| {
+                prepared.supervisor_path()
+            });
         let (openshell_endpoint, gateway_tls_server_name) =
             host_control_openshell_endpoint(&self.config.grpc_endpoint)
                 .map_err(Status::failed_precondition)?;
@@ -1371,8 +1428,14 @@ impl VmDriver {
         .map_err(|error| Status::internal(format!("encode main process spec: {error}")))?;
         let upstream_proxy_args = upstream_proxy_cli_args(&self.config)
             .map_err(|error| Status::invalid_argument(format!("render upstream proxy: {error}")))?;
-        let mut command = Command::new(&supervisor_binary);
+        let mut command = Command::new(supervisor_program);
         isolate_host_control_environment(&mut command);
+        if let Some(prepared) = prepared_identity.as_ref() {
+            command.env(
+                openshell_core::sandbox_env::PROVIDER_SPIFFE_WORKLOAD_API_SOCKET,
+                prepared.socket_path(),
+            );
+        }
         command
             .kill_on_drop(true)
             .stdin(Stdio::null())
@@ -1475,15 +1538,34 @@ impl VmDriver {
         let child = command.spawn().map_err(|error| {
             Status::internal(format!(
                 "start host supervisor '{}': {error}",
-                supervisor_binary.display()
+                supervisor_program.display()
             ))
         })?;
+        let supervisor_identity = match (prepared_identity, self.supervisor_identity.as_ref()) {
+            (Some(prepared), Some(identity)) => {
+                let pid = child.id().ok_or_else(|| {
+                    Status::internal("host supervisor exited before its identity was recorded")
+                })?;
+                // On failure the child is dropped, which kills it.
+                Some(
+                    prepared
+                        .start(identity.clone(), &sandbox.id, pid)
+                        .map_err(|error| {
+                            Status::internal(format!("start supervisor Workload API: {error}"))
+                        })?,
+                )
+            }
+            _ => None,
+        };
         #[cfg(unix)]
-        {
-            Ok((child, Some(fs::File::from(liveness_write))))
-        }
+        let liveness = Some(fs::File::from(liveness_write));
         #[cfg(not(unix))]
-        Ok((child, None))
+        let liveness = None;
+        Ok(HostSupervisor {
+            child,
+            liveness,
+            supervisor_identity,
+        })
     }
 
     #[must_use]
@@ -2097,7 +2179,7 @@ impl VmDriver {
             launcher_pid = child.id().unwrap_or(0),
                 "vm driver: launcher spawned"
         );
-        let (supervisor, supervisor_liveness) = match self
+        let host_supervisor = match self
             .spawn_host_supervisor(
                 &sandbox,
                 &state_dir,
@@ -2124,9 +2206,10 @@ impl VmDriver {
         };
         let process = Arc::new(Mutex::new(VmProcess {
             child,
-            supervisor,
-            supervisor_liveness,
+            supervisor: host_supervisor.child,
+            supervisor_liveness: host_supervisor.liveness,
             deleting: false,
+            supervisor_identity: host_supervisor.supervisor_identity,
         }));
 
         let mut process_to_stop = None;
@@ -4867,6 +4950,7 @@ pub async fn run_image_preparation_worker(request_path: &Path) -> Result<(), Str
         preparation_root: Some(directory),
         events,
         lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+        supervisor_identity: None,
     };
     let prepare = async {
         if let Some(overlay) = request.overlay {
@@ -7467,6 +7551,9 @@ async fn terminate_sandbox_processes_within(
         })
         .err();
     process.supervisor_liveness.take();
+    // The supervisor is gone: stop its Workload API and remove the socket
+    // and the binary link.
+    process.supervisor_identity.take();
     let vm_error = terminate_vm_process(&mut process.child).await.err();
 
     match (supervisor_error, vm_error) {
@@ -10671,6 +10758,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            supervisor_identity: None,
         };
 
         assert_eq!(driver.capabilities().default_image, "openshell/sandbox:dev");
@@ -10931,6 +11019,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            supervisor_identity: None,
         };
         let sandbox = Sandbox {
             spec: Some(SandboxSpec {
@@ -10965,6 +11054,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            supervisor_identity: None,
         };
         let sandbox = Sandbox {
             spec: Some(SandboxSpec {
@@ -10993,6 +11083,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            supervisor_identity: None,
         };
         let sandbox = Sandbox {
             spec: Some(SandboxSpec {
@@ -11022,6 +11113,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            supervisor_identity: None,
         };
 
         assert_eq!(
@@ -11046,6 +11138,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            supervisor_identity: None,
         };
 
         assert_eq!(
@@ -11067,6 +11160,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            supervisor_identity: None,
         };
 
         let error = driver
@@ -11082,6 +11176,63 @@ mod tests {
             panic!("driver startup must reject an empty bootstrap configuration");
         };
         assert!(error.contains("sandbox image cannot be used"));
+    }
+
+    fn supervisor_identity_test_config(state_dir: &Path, enabled: bool) -> VmDriverConfig {
+        let launcher = state_dir.join("launcher");
+        std::fs::create_dir_all(state_dir).unwrap();
+        std::fs::write(&launcher, b"").unwrap();
+        VmDriverConfig {
+            grpc_endpoint: "http://127.0.0.1:8080".to_string(),
+            bootstrap_image: "bootstrap:latest".to_string(),
+            state_dir: state_dir.to_path_buf(),
+            launcher_bin: Some(launcher),
+            supervisor_identity: crate::supervisor_identity::SupervisorIdentityConfig {
+                enabled,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_identity_disabled_creates_no_issuer_or_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let driver = VmDriver::new(supervisor_identity_test_config(temp.path(), false))
+            .await
+            .unwrap();
+        assert!(driver.supervisor_identity().is_none());
+        assert!(!temp.path().join("supervisor-identity").exists());
+        driver.remove_socket_root();
+    }
+
+    #[tokio::test]
+    async fn supervisor_identity_enabled_loads_a_private_signing_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let driver = VmDriver::new(supervisor_identity_test_config(temp.path(), true))
+            .await
+            .unwrap();
+        let identity = driver.supervisor_identity().expect("issuer");
+        assert_eq!(identity.issuer(), "http://127.0.0.1:8961");
+        let key = temp
+            .path()
+            .join("supervisor-identity")
+            .join("jwt-signing-key.p8");
+        assert_eq!(
+            PermissionsExt::mode(&std::fs::metadata(&key).unwrap().permissions()) & 0o777,
+            0o600
+        );
+        driver.remove_socket_root();
+    }
+
+    #[tokio::test]
+    async fn supervisor_identity_rejects_a_state_dir_too_deep_for_sockets() {
+        let temp = tempfile::tempdir().unwrap();
+        let deep = temp.path().join("d".repeat(80));
+        let Err(error) = VmDriver::new(supervisor_identity_test_config(&deep, true)).await else {
+            panic!("a socket path over the UNIX limit must fail at startup");
+        };
+        assert!(error.contains("shorter driver state directory"), "{error}");
     }
 
     #[test]
@@ -11735,6 +11886,7 @@ mod tests {
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            supervisor_identity: None,
         };
 
         let state_file = sandbox_state_dir(&driver_state, "sandbox-123").unwrap();
@@ -11767,6 +11919,7 @@ mod tests {
                 child: spawn_exited_child(),
                 supervisor: spawn_exited_child(),
                 supervisor_liveness: None,
+                supervisor_identity: None,
                 deleting: false,
             })));
         }
@@ -11800,6 +11953,7 @@ mod tests {
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            supervisor_identity: None,
         };
 
         let state_dir = sandbox_state_dir(&driver_state, "sandbox-123").unwrap();
@@ -11854,6 +12008,7 @@ mod tests {
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            supervisor_identity: None,
         };
 
         let state_dir = sandbox_state_dir(&driver_state, "sandbox-123").unwrap();
@@ -12329,6 +12484,7 @@ while :; do sleep 0.05; done"#,
             child: spawn_exited_child(),
             supervisor,
             supervisor_liveness: Some(fs::File::from(write_end)),
+            supervisor_identity: None,
             deleting: false,
         };
         terminate_sandbox_processes(&mut process).await.unwrap();
@@ -12410,6 +12566,7 @@ while :; do sleep 0.05; done"#,
             child: spawn_exited_child(),
             supervisor,
             supervisor_liveness: Some(fs::File::from(write_end)),
+            supervisor_identity: None,
             deleting: false,
         };
         let grace = Duration::from_millis(300);
@@ -12461,6 +12618,7 @@ while :; do sleep 0.05; done"#,
             child,
             supervisor: spawn_exited_child(),
             supervisor_liveness: None,
+            supervisor_identity: None,
             deleting: false,
         }));
 
@@ -12500,6 +12658,7 @@ while :; do sleep 0.05; done"#,
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            supervisor_identity: None,
         }
     }
 
@@ -12841,6 +13000,7 @@ while :; do sleep 0.05; done"#,
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(extensions),
+            supervisor_identity: None,
         }
     }
 

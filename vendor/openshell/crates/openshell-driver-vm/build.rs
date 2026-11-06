@@ -25,6 +25,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPENSHELL_VM_RUNTIME_COMPRESSED_DIR");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    generate_workload_api_server(&out_dir);
 
     let Ok(dir) = env::var("OPENSHELL_VM_RUNTIME_COMPRESSED_DIR") else {
         // Lint, check and test builds (the debug profile) never run the embedded
@@ -73,6 +74,71 @@ fn main() {
             fs::metadata(&dst_path).map_or(0, |m| m.len())
         );
     }
+}
+
+/// Server stub for SPIFFE's `SpiffeWorkloadAPI` service (`workload.proto`,
+/// which has no package), written to `OUT_DIR/.SpiffeWorkloadAPI.rs`. The
+/// messages are hand-written in `src/supervisor_identity/workload_api.rs`, so no
+/// `protoc` is needed.
+fn generate_workload_api_server(out_dir: &Path) {
+    use tonic_build::manual::{Builder, Method, Service};
+
+    let method = |name: &str, route: &str, input: &str, output: &str, streaming: bool| {
+        let builder = Method::builder()
+            .name(name)
+            .route_name(route)
+            .input_type(format!("super::{input}"))
+            .output_type(format!("super::{output}"))
+            .codec_path("tonic_prost::ProstCodec");
+        if streaming {
+            builder.server_streaming().build()
+        } else {
+            builder.build()
+        }
+    };
+    let service = Service::builder()
+        .name("SpiffeWorkloadAPI")
+        .package("")
+        .method(method(
+            "fetch_x509_svid",
+            "FetchX509SVID",
+            "X509SvidRequest",
+            "X509SvidResponse",
+            true,
+        ))
+        .method(method(
+            "fetch_x509_bundles",
+            "FetchX509Bundles",
+            "X509BundlesRequest",
+            "X509BundlesResponse",
+            true,
+        ))
+        .method(method(
+            "fetch_jwt_svid",
+            "FetchJWTSVID",
+            "JwtSvidRequest",
+            "JwtSvidResponse",
+            false,
+        ))
+        .method(method(
+            "fetch_jwt_bundles",
+            "FetchJWTBundles",
+            "JwtBundlesRequest",
+            "JwtBundlesResponse",
+            true,
+        ))
+        .method(method(
+            "validate_jwt_svid",
+            "ValidateJWTSVID",
+            "ValidateJwtSvidRequest",
+            "ValidateJwtSvidResponse",
+            false,
+        ))
+        .build();
+    Builder::new()
+        .build_client(false)
+        .out_dir(out_dir)
+        .compile(&[service]);
 }
 
 fn generate_stub_resources(out_dir: &Path) {

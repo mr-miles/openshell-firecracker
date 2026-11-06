@@ -159,6 +159,7 @@ fn driver(root: &Path) -> VmDriver {
         preparation_root: None,
         events: broadcast::channel(WATCH_BUFFER).0,
         lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+        supervisor_identity: None,
     }
 }
 

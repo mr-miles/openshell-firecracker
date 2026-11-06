@@ -206,6 +206,45 @@ struct Args {
     /// Working directory for a sandbox whose image sets none. Unset: `/`.
     #[arg(long, env = "OPENSHELL_VM_DEFAULT_WORKDIR")]
     default_workdir: Option<String>,
+
+    /// Issue SPIFFE JWT-SVIDs to host supervisors over a per-sandbox Workload
+    /// API socket, and serve the JWKS that verifies them. Off: no socket, no
+    /// JWKS listener, nothing in the supervisor's environment.
+    #[arg(
+        long,
+        env = "OPENSHELL_VM_SUPERVISOR_IDENTITY",
+        default_value_t = false
+    )]
+    supervisor_identity: bool,
+
+    /// SPIFFE trust domain of supervisor identities.
+    #[arg(
+        long,
+        env = "OPENSHELL_VM_SUPERVISOR_IDENTITY_TRUST_DOMAIN",
+        default_value = openshell_driver_vm::supervisor_identity::DEFAULT_TRUST_DOMAIN
+    )]
+    supervisor_identity_trust_domain: String,
+
+    /// Issuer URL (`iss`) relying parties reach the JWKS endpoints at.
+    /// Default: `http://<jwks bind address>`.
+    #[arg(long, env = "OPENSHELL_VM_SUPERVISOR_IDENTITY_ISSUER")]
+    supervisor_identity_issuer: Option<String>,
+
+    /// TCP address of the OIDC discovery and JWKS endpoints.
+    #[arg(
+        long,
+        env = "OPENSHELL_VM_SUPERVISOR_IDENTITY_JWKS_BIND",
+        default_value_t = openshell_driver_vm::supervisor_identity::DEFAULT_JWKS_BIND
+    )]
+    supervisor_identity_jwks_bind: SocketAddr,
+
+    /// JWT-SVID lifetime in seconds.
+    #[arg(
+        long,
+        env = "OPENSHELL_VM_SUPERVISOR_IDENTITY_SVID_TTL_SECS",
+        default_value_t = openshell_driver_vm::supervisor_identity::DEFAULT_SVID_TTL_SECS
+    )]
+    supervisor_identity_svid_ttl_secs: u64,
 }
 
 #[tokio::main]
@@ -285,9 +324,32 @@ async fn main() -> Result<()> {
         rootfs_tar_staging_dir: args.rootfs_tar_staging_dir.clone(),
         rootfs_tar_max_bytes: args.rootfs_tar_max_bytes,
         default_workdir: args.default_workdir.clone(),
+        supervisor_identity: openshell_driver_vm::supervisor_identity::SupervisorIdentityConfig {
+            enabled: args.supervisor_identity,
+            trust_domain: args.supervisor_identity_trust_domain.clone(),
+            issuer: args.supervisor_identity_issuer.clone(),
+            jwks_bind: args.supervisor_identity_jwks_bind,
+            svid_ttl_secs: args.supervisor_identity_svid_ttl_secs,
+        },
     })
     .await
     .map_err(|err| miette::miette!("{err}"))?;
+
+    let jwks_server = match driver.supervisor_identity() {
+        Some(identity) => {
+            let bind = identity.jwks_bind();
+            let listener = tokio::net::TcpListener::bind(bind)
+                .await
+                .map_err(|err| miette::miette!("bind supervisor identity JWKS on {bind}: {err}"))?;
+            info!(address = %bind, issuer = %identity.issuer(), "Serving supervisor identity JWKS");
+            Some(tokio::spawn(async move {
+                if let Err(err) = identity.serve_jwks(listener, std::future::pending()).await {
+                    tracing::error!(error = %err, "supervisor identity JWKS server failed");
+                }
+            }))
+        }
+        None => None,
+    };
 
     let socket_cleanup = driver.clone();
     let result = match listen_mode {
@@ -323,6 +385,9 @@ async fn main() -> Result<()> {
         }
     };
     socket_cleanup.remove_socket_root();
+    if let Some(server) = jwks_server {
+        server.abort();
+    }
     result
 }
 
