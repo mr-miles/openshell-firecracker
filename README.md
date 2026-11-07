@@ -118,6 +118,11 @@ and applies them:
   `OPENSHELL_VM_DEFAULT_WORKDIR=/sandbox` on the driver: it applies to any sandbox whose
   image sets no `WORKDIR`, rootfs tar uploads included, and never overrides an image's.
   It must be an absolute path below `/` and is validated at driver start.
+- **Default workdir link.** When `OPENSHELL_VM_DEFAULT_WORKDIR` is set and an image's
+  `WORKDIR` is somewhere else, the guest init makes the default a symlink to the image's
+  `WORKDIR` at boot (for example `/sandbox -> /app`), so tools that expect the default path
+  find the workload's files. It is skipped, with a warning, if the image already has
+  something non-empty at that path, a symlink in its parents, or if one path contains the other.
 - **Refused `WORKDIR`.** A relative path, one containing `..`, or one under `/proc`,
   `/sys`, `/dev` or OpenShell's own directories is ignored with a warning.
 - Rootfs tar uploads carry no image configuration, so they start in `/` unless `OPENSHELL_VM_DEFAULT_WORKDIR` is set.

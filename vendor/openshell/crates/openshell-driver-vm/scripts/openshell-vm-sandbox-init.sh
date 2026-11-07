@@ -321,6 +321,12 @@ setup_sandbox_workdir() {
     local owner
     local current_owner
     sandbox_dir="$(root_path /sandbox)"
+    # setup_workdir_link may have made /sandbox a link to the image WORKDIR on
+    # an earlier boot of this overlay; chmod would follow it to the WORKDIR.
+    if [ -L "$sandbox_dir" ]; then
+        ts "/sandbox is a link to $(readlink "$sandbox_dir"); leaving it as is"
+        return 0
+    fi
     owner="$(sandbox_owner)"
     mkdir -p "$sandbox_dir"
     current_owner="$(stat -c '%u:%g' "$sandbox_dir" 2>/dev/null || true)"
@@ -382,6 +388,59 @@ setup_image_workdir() {
     fi
     chmod u+rwx "$path"
     ts "prepared image WORKDIR ${workdir} (${owner})"
+}
+
+# Make the operator's default workdir (OPENSHELL_VM_WORKDIR_LINK, from the
+# driver's OPENSHELL_VM_DEFAULT_WORKDIR) a symlink to the image's WORKDIR, so
+# tools that expect the default location find the workload's files when the
+# image chose another directory. The driver sets it only when the two differ
+# and neither contains the other. Best effort: missing parents are created, an
+# empty directory (such as the /sandbox init itself creates) is replaced, and
+# anything else at the path belongs to the image and is left alone. Parents
+# that are symlinks are not followed, as in setup_image_workdir.
+setup_workdir_link() {
+    local link="$1"
+    local workdir="$2"
+    local path component previous=""
+    local -a components
+
+    [ -n "$link" ] && [ -n "$workdir" ] || return 0
+
+    path="${ROOT_PREFIX:-}"
+    IFS=/ read -r -a components <<<"${link#/}"
+    for component in "${components[@]}"; do
+        [ -n "$component" ] || continue
+        if [ -n "$previous" ]; then
+            path="${path}/${previous}"
+            if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+                ts "WARN: not linking ${link} to ${workdir}: ${path#"${ROOT_PREFIX:-}"} is not a plain directory"
+                return 0
+            fi
+            mkdir -p "$path"
+        fi
+        previous="$component"
+    done
+    path="${path}/${previous}"
+
+    if [ -L "$path" ]; then
+        if [ "$(readlink "$path")" != "$workdir" ]; then
+            ts "WARN: not linking ${link} to ${workdir}: it already links to $(readlink "$path")"
+        fi
+        return 0
+    fi
+    if [ -d "$path" ] && ! rmdir "$path" 2>/dev/null; then
+        ts "WARN: not linking ${link} to ${workdir}: the image's ${link} is not empty"
+        return 0
+    fi
+    if [ -e "$path" ]; then
+        ts "WARN: not linking ${link} to ${workdir}: ${link} is not a directory"
+        return 0
+    fi
+    if ! ln -s "$workdir" "$path"; then
+        ts "WARN: failed to link ${link} to ${workdir}"
+        return 0
+    fi
+    ts "linked ${link} -> ${workdir}"
 }
 
 configure_hostname() {
@@ -531,9 +590,15 @@ run_post_overlay_setup() {
     mount -t cgroup2 cgroup2 "$(root_path /sys/fs/cgroup)" 2>/dev/null &
     wait
 
+    # Init-only; setup_image_workdir unsets OPENSHELL_VM_WORKDIR itself.
+    local workdir="${OPENSHELL_VM_WORKDIR:-}"
+    local workdir_link="${OPENSHELL_VM_WORKDIR_LINK:-}"
+    unset OPENSHELL_VM_WORKDIR_LINK
+
     reconcile_sandbox_account
     setup_sandbox_workdir
     setup_image_workdir
+    setup_workdir_link "$workdir_link" "$workdir"
 
     configure_hostname
     configure_hosts
