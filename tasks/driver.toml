@@ -71,4 +71,9 @@ tar -czf "dist/openshell-driver-vm-$(uname -m)-linux.tar.gz" \
 # install.sh reads this to tell the operator which OpenShell revision to match.
 . driver/UPSTREAM.env
 printf '%s\n' "$OPENSHELL_COMMIT" > dist/openshell-commit.txt
+# A runtime built from another revision (see driver/stage-runtime.sh) records it too.
+if [ -n "${OPENSHELL_RUNTIME_COMMIT:-}" ]; then
+  printf '%s %s\n' "${OPENSHELL_RUNTIME_REPO:-$OPENSHELL_REPO}" "$OPENSHELL_RUNTIME_COMMIT" \
+    > dist/openshell-runtime-commit.txt
+fi
 '''

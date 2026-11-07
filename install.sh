@@ -318,6 +318,12 @@ warn_if_gateway_differs() {
     local built gateway
     built="$(tr -d '[:space:]' < "$TMP/openshell-commit.txt")"
     say "the driver was built from OpenShell commit $built"
+    if grep -qF -- "  openshell-runtime-commit.txt" "$TMP/SHA256SUMS"; then
+        fetch openshell-runtime-commit.txt
+        verify openshell-runtime-commit.txt
+        say "warning: its embedded supervisor was built from $(cat "$TMP/openshell-runtime-commit.txt")," >&2
+        say "         not that commit: a trial build; see the README, \"Compatibility\"." >&2
+    fi
     command -v openshell-gateway >/dev/null 2>&1 || return 0
     gateway="$(openshell-gateway --version 2>/dev/null | head -n1 || true)"
     [ -z "$gateway" ] || say "your gateway reports: $gateway"
