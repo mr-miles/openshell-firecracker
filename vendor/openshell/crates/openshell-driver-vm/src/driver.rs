@@ -225,8 +225,11 @@ const MIN_SANDBOX_UID: u32 = 1;
 const MAX_SANDBOX_UID: u32 = u32::MAX - 1;
 /// Guest init variable naming the image's working directory.
 const GUEST_WORKDIR_ENV: &str = "OPENSHELL_VM_WORKDIR";
+/// Guest init variable naming a path to symlink to the image's working directory.
+const GUEST_WORKDIR_LINK_ENV: &str = "OPENSHELL_VM_WORKDIR_LINK";
 // v5: a prepared image carries `image-config.json` (the image ENV and WORKDIR).
-const PREPARED_IMAGE_CACHE_LAYOUT_VERSION: &str = "sandbox-prepared-rootfs-ext4-umoci-v5";
+// v6: image prep no longer adds an empty `/sandbox`.
+const PREPARED_IMAGE_CACHE_LAYOUT_VERSION: &str = "sandbox-prepared-rootfs-ext4-umoci-v6";
 const IMAGE_IDENTITY_FILE: &str = "image-identity";
 const IMAGE_REFERENCE_FILE: &str = "image-reference";
 const IMAGE_PREP_INIT_MODE: &str = "image-prep";
@@ -2133,6 +2136,13 @@ impl VmDriver {
             command
                 .arg("--vm-env")
                 .arg(format!("{GUEST_WORKDIR_ENV}={workdir}"));
+        }
+        if let Some(link) = workdir_link(self.config.default_workdir.as_deref(), workdir.as_deref())
+        {
+            // Guest init points the operator's default workdir at the image's.
+            command
+                .arg("--vm-env")
+                .arg(format!("{GUEST_WORKDIR_LINK_ENV}={link}"));
         }
         for env in build_guest_environment(&sandbox, &self.config) {
             command.arg("--vm-env").arg(env);
@@ -6266,6 +6276,17 @@ fn build_guest_environment(sandbox: &Sandbox, config: &VmDriverConfig) -> Vec<St
         .into_iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect()
+}
+
+/// The path guest init should make a symlink to the workload's working
+/// directory: the operator's default workdir, when the image chose a different
+/// one. None when either contains the other, as the link would then hide the
+/// working directory or point into itself. Both paths are already normalized.
+fn workdir_link(default_workdir: Option<&str>, workdir: Option<&str>) -> Option<String> {
+    let (link, workdir) = (default_workdir?, workdir?);
+    let contains =
+        |outer: &str, inner: &str| inner == outer || inner.starts_with(&format!("{outer}/"));
+    (!contains(link, workdir) && !contains(workdir, link)).then(|| link.to_string())
 }
 
 fn sandboxes_root_dir(root: &Path) -> PathBuf {
@@ -12248,7 +12269,7 @@ mod tests {
         assert_eq!(
             image_account,
             format!(
-                "sandbox-prepared-rootfs-ext4-umoci-v5:openshell-{}:image-account:{image_hash}",
+                "sandbox-prepared-rootfs-ext4-umoci-v6:openshell-{}:image-account:{image_hash}",
                 crate::VERSION
             )
         );
@@ -13637,6 +13658,144 @@ while :; do sleep 0.05; done"#,
         let output = run_setup_image_workdir(root.path(), None);
         assert!(output.status.success(), "{output:?}");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn workdir_link_points_the_default_at_a_different_image_workdir() {
+        assert_eq!(
+            workdir_link(Some("/sandbox"), Some("/app")).as_deref(),
+            Some("/sandbox")
+        );
+        // An image without a WORKDIR runs in the default itself.
+        assert_eq!(workdir_link(Some("/sandbox"), Some("/sandbox")), None);
+        assert_eq!(workdir_link(None, Some("/app")), None);
+        assert_eq!(workdir_link(Some("/sandbox"), None), None);
+        // Nesting either way would hide the workdir or loop into it.
+        assert_eq!(workdir_link(Some("/sandbox"), Some("/sandbox/app")), None);
+        assert_eq!(
+            workdir_link(Some("/srv/app/sandbox"), Some("/srv/app")),
+            None
+        );
+        // A shared prefix is not nesting.
+        assert_eq!(
+            workdir_link(Some("/sandbox"), Some("/sandbox-app")).as_deref(),
+            Some("/sandbox")
+        );
+    }
+
+    /// Runs `setup_workdir_link` from the guest init script against a host
+    /// directory standing in for the guest root.
+    #[cfg(unix)]
+    fn run_setup_workdir_link(root: &Path, link: &str, workdir: &str) -> std::process::Output {
+        let script = include_str!("../scripts/openshell-vm-sandbox-init.sh");
+        let start = script
+            .find("setup_workdir_link() {")
+            .expect("init script defines setup_workdir_link");
+        let end = start + script[start..].find("\n}\n").expect("function end") + 3;
+        let program = format!(
+            "set -euo pipefail\nts() {{ echo \"$@\"; }}\n{}\nsetup_workdir_link \"$1\" \"$2\"\n",
+            &script[start..end]
+        );
+        std::process::Command::new("bash")
+            .args(["-c", &program, "bash", link, workdir])
+            .env("ROOT_PREFIX", root)
+            .output()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vm_init_setup_workdir_link_replaces_an_empty_directory() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("sandbox")).unwrap();
+        // The second run is a reboot of the same overlay.
+        for _ in 0..2 {
+            let output = run_setup_workdir_link(root.path(), "/sandbox", "/app");
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                fs::read_link(root.path().join("sandbox")).unwrap(),
+                Path::new("/app")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vm_init_setup_workdir_link_creates_missing_parents() {
+        let root = tempfile::tempdir().unwrap();
+        let output = run_setup_workdir_link(root.path(), "/home/sandbox", "/app");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read_link(root.path().join("home/sandbox")).unwrap(),
+            Path::new("/app")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vm_init_setup_workdir_link_leaves_image_content_and_symlinks_alone() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("sandbox")).unwrap();
+        fs::write(root.path().join("sandbox/kept"), b"image file").unwrap();
+        let output = run_setup_workdir_link(root.path(), "/sandbox", "/app");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read(root.path().join("sandbox/kept")).unwrap(),
+            b"image file"
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), root.path().join("home")).unwrap();
+        let output = run_setup_workdir_link(root.path(), "/home/sandbox", "/app");
+        assert!(output.status.success(), "{output:?}");
+        assert!(!elsewhere.path().join("sandbox").exists());
+    }
+
+    /// Runs `setup_sandbox_home` from the guest init script against a host
+    /// directory standing in for the guest root, and returns the new passwd.
+    #[cfg(unix)]
+    fn run_setup_sandbox_home(passwd: &str, workdir: &str) -> String {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("etc")).unwrap();
+        fs::write(root.path().join("etc/passwd"), passwd).unwrap();
+        let script = include_str!("../scripts/openshell-vm-sandbox-init.sh");
+        let start = script
+            .find("setup_sandbox_home() {")
+            .expect("init script defines setup_sandbox_home");
+        let end = start + script[start..].find("\n}\n").expect("function end") + 3;
+        let program = format!(
+            "set -euo pipefail\nts() {{ echo \"$@\"; }}\nroot_path() {{ printf '%s%s\\n' \"$ROOT_PREFIX\" \"$1\"; }}\n{}\nsetup_sandbox_home \"$1\"\n",
+            &script[start..end]
+        );
+        let output = std::process::Command::new("bash")
+            .args(["-c", &program, "bash", workdir])
+            .env("ROOT_PREFIX", root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        fs::read_to_string(root.path().join("etc/passwd")).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vm_init_setup_sandbox_home_follows_the_workdir() {
+        let created = "root:x:0:0:root:/root:/bin/sh\n\
+                       sandbox:x:1000:1000:OpenShell Sandbox:/sandbox:/bin/sh\n";
+        assert_eq!(
+            run_setup_sandbox_home(created, "/app"),
+            "root:x:0:0:root:/root:/bin/sh\n\
+             sandbox:x:1000:1000:OpenShell Sandbox:/app:/bin/sh\n"
+        );
+        // Without a workdir the home is the supervisor's fallback, not `/`.
+        let moved = "sandbox:x:1000:1000:OpenShell Sandbox:/app:/bin/sh\n";
+        assert_eq!(
+            run_setup_sandbox_home(moved, ""),
+            "sandbox:x:1000:1000:OpenShell Sandbox:/sandbox:/bin/sh\n"
+        );
+        // An image's own account keeps its home.
+        let image = "sandbox:x:998:997:Sandbox:/home/sandbox:/bin/sh\n";
+        assert_eq!(run_setup_sandbox_home(image, "/app"), image);
     }
 
     #[cfg(unix)]

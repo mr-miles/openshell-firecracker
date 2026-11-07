@@ -203,9 +203,10 @@ struct Args {
     #[arg(long, env = "OPENSHELL_VM_ROOTFS_TAR_MAX_BYTES")]
     rootfs_tar_max_bytes: Option<u64>,
 
-    /// Working directory for a sandbox whose image sets none. Unset: `/`.
-    #[arg(long, env = "OPENSHELL_VM_DEFAULT_WORKDIR")]
-    default_workdir: Option<String>,
+    /// Working directory for a sandbox whose image sets none. It never overrides
+    /// an image's `WORKDIR`; where the image has one elsewhere, it is linked to it.
+    #[arg(long, env = "OPENSHELL_VM_DEFAULT_WORKDIR", default_value = "/sandbox")]
+    default_workdir: String,
 
     /// Issue SPIFFE JWT-SVIDs to host supervisors over a per-sandbox Workload
     /// API socket, and serve the JWKS that verifies them. Off: no socket, no
@@ -323,7 +324,7 @@ async fn main() -> Result<()> {
         sandbox_gid: args.sandbox_gid,
         rootfs_tar_staging_dir: args.rootfs_tar_staging_dir.clone(),
         rootfs_tar_max_bytes: args.rootfs_tar_max_bytes,
-        default_workdir: args.default_workdir.clone(),
+        default_workdir: Some(args.default_workdir.clone()),
         supervisor_identity: openshell_driver_vm::supervisor_identity::SupervisorIdentityConfig {
             enabled: args.supervisor_identity,
             trust_domain: args.supervisor_identity_trust_domain.clone(),

@@ -110,20 +110,24 @@ and applies them:
 - **Working directory.** The workload starts in the image's `WORKDIR`. The guest init
   creates it if absent and hands it to the sandbox user, so it is writable as in a
   container, and it is passed to the supervisor as `--workdir`, which also makes it
-  writable under the filesystem policy. `HOME` follows it, unless the image sets `HOME`.
-- **No `WORKDIR`.** Starts in `/`, as a container would; nothing is made writable beyond
-  what the policy lists (by default only `/tmp`), and the driver logs a warning at launch.
-  Images that relied on the old `/sandbox` default (for example ones built from
-  OpenShell's `deploy/docker/Dockerfile.sandbox`) need a `WORKDIR /sandbox`, or set
-  `OPENSHELL_VM_DEFAULT_WORKDIR=/sandbox` on the driver: it applies to any sandbox whose
-  image sets no `WORKDIR`, rootfs tar uploads included, and never overrides an image's.
-  It must be an absolute path below `/` and is validated at driver start.
+  writable under the filesystem policy. `HOME` follows it, unless the image sets `HOME`, and so
+  does the home of the `sandbox` account OpenShell creates (an image's own account keeps its home).
+- **No `WORKDIR`.** Starts in the driver's default workdir, `OPENSHELL_VM_DEFAULT_WORKDIR`
+  (default `/sandbox`), which the guest init creates and hands to the sandbox user like an
+  image's. It applies to any sandbox whose image sets no `WORKDIR`, rootfs tar uploads
+  included, and never overrides an image's. It must be an absolute path below `/` and is
+  validated at driver start; `/` itself is refused, since Landlock would leave it read-only.
+- **Default workdir link.** If the image's `WORKDIR` is somewhere else, the default becomes a
+  symlink to it at boot (for example `/sandbox -> /app`), so tools that expect the default
+  path find the workload's files. The link is skipped, with a warning, if the image already
+  has something non-empty at that path, a symlink in its parents, or if one path contains
+  the other. The guest creates no other `/sandbox` of its own.
 - **Refused `WORKDIR`.** A relative path, one containing `..`, or one under `/proc`,
   `/sys`, `/dev` or OpenShell's own directories is ignored with a warning.
-- Rootfs tar uploads carry no image configuration, so they start in `/` unless `OPENSHELL_VM_DEFAULT_WORKDIR` is set.
+- Rootfs tar uploads carry no image configuration, so they start in the default workdir.
 - The image's `User` is not applied.
 
-Prepared-image caches from before this change are rebuilt once (cache layout `v5`).
+Prepared-image caches from before this change are rebuilt once (cache layout `v6`).
 
 ## Requirements
 
@@ -389,7 +393,7 @@ driver inherits:
 | `OPENSHELL_VM_FIRECRACKER_LEASE_DIR` | Sub-uid lease directory. Defaults to `$XDG_RUNTIME_DIR/openshell-firecracker-leases` |
 | `OPENSHELL_FIRECRACKER_DRIVER` | Path of the driver, if it cannot be found from the launcher's parent |
 
-The driver's `OPENSHELL_VM_DEFAULT_WORKDIR` (optional) sets the working directory for
+The driver's `OPENSHELL_VM_DEFAULT_WORKDIR` (default `/sandbox`) sets the working directory for
 sandboxes whose image has none ([Image ENV and WORKDIR](#image-env-and-workdir)).
 The driver's `OPENSHELL_VM_SUPERVISOR_IDENTITY*` options (optional, off by default) are in
 [Supervisor identity](#supervisor-identity).
