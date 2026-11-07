@@ -228,7 +228,8 @@ const GUEST_WORKDIR_ENV: &str = "OPENSHELL_VM_WORKDIR";
 /// Guest init variable naming a path to symlink to the image's working directory.
 const GUEST_WORKDIR_LINK_ENV: &str = "OPENSHELL_VM_WORKDIR_LINK";
 // v5: a prepared image carries `image-config.json` (the image ENV and WORKDIR).
-const PREPARED_IMAGE_CACHE_LAYOUT_VERSION: &str = "sandbox-prepared-rootfs-ext4-umoci-v5";
+// v6: image prep no longer adds an empty `/sandbox`.
+const PREPARED_IMAGE_CACHE_LAYOUT_VERSION: &str = "sandbox-prepared-rootfs-ext4-umoci-v6";
 const IMAGE_IDENTITY_FILE: &str = "image-identity";
 const IMAGE_REFERENCE_FILE: &str = "image-reference";
 const IMAGE_PREP_INIT_MODE: &str = "image-prep";
@@ -12269,7 +12270,7 @@ mod tests {
         assert_eq!(
             image_account,
             format!(
-                "sandbox-prepared-rootfs-ext4-umoci-v5:openshell-{}:image-account:{image_hash}",
+                "sandbox-prepared-rootfs-ext4-umoci-v6:openshell-{}:image-account:{image_hash}",
                 crate::VERSION
             )
         );
@@ -13747,6 +13748,52 @@ while :; do sleep 0.05; done"#,
         let output = run_setup_workdir_link(root.path(), "/home/sandbox", "/app");
         assert!(output.status.success(), "{output:?}");
         assert!(!elsewhere.path().join("sandbox").exists());
+    }
+
+    /// Runs `setup_sandbox_home` from the guest init script against a host
+    /// directory standing in for the guest root, and returns the new passwd.
+    #[cfg(unix)]
+    fn run_setup_sandbox_home(passwd: &str, workdir: &str) -> String {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("etc")).unwrap();
+        fs::write(root.path().join("etc/passwd"), passwd).unwrap();
+        let script = include_str!("../scripts/openshell-vm-sandbox-init.sh");
+        let start = script
+            .find("setup_sandbox_home() {")
+            .expect("init script defines setup_sandbox_home");
+        let end = start + script[start..].find("\n}\n").expect("function end") + 3;
+        let program = format!(
+            "set -euo pipefail\nts() {{ echo \"$@\"; }}\nroot_path() {{ printf '%s%s\\n' \"$ROOT_PREFIX\" \"$1\"; }}\n{}\nsetup_sandbox_home \"$1\"\n",
+            &script[start..end]
+        );
+        let output = std::process::Command::new("bash")
+            .args(["-c", &program, "bash", workdir])
+            .env("ROOT_PREFIX", root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        fs::read_to_string(root.path().join("etc/passwd")).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vm_init_setup_sandbox_home_follows_the_workdir() {
+        let created = "root:x:0:0:root:/root:/bin/sh\n\
+                       sandbox:x:1000:1000:OpenShell Sandbox:/sandbox:/bin/sh\n";
+        assert_eq!(
+            run_setup_sandbox_home(created, "/app"),
+            "root:x:0:0:root:/root:/bin/sh\n\
+             sandbox:x:1000:1000:OpenShell Sandbox:/app:/bin/sh\n"
+        );
+        // Without a workdir the home is the supervisor's fallback, not `/`.
+        let moved = "sandbox:x:1000:1000:OpenShell Sandbox:/app:/bin/sh\n";
+        assert_eq!(
+            run_setup_sandbox_home(moved, ""),
+            "sandbox:x:1000:1000:OpenShell Sandbox:/sandbox:/bin/sh\n"
+        );
+        // An image's own account keeps its home.
+        let image = "sandbox:x:998:997:Sandbox:/home/sandbox:/bin/sh\n";
+        assert_eq!(run_setup_sandbox_home(image, "/app"), image);
     }
 
     #[cfg(unix)]

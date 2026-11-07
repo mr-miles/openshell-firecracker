@@ -46,11 +46,6 @@ sandbox_owner() {
     sandbox_owner_from_passwd "$(root_path /etc/passwd)"
 }
 
-sandbox_owner_for_root() {
-    local root="$1"
-    sandbox_owner_from_passwd "$root/etc/passwd"
-}
-
 sandbox_owner_from_passwd() {
     local passwd_path name uid gid rest
     passwd_path="$1"
@@ -100,7 +95,6 @@ ensure_target_runtime() {
     mkdir -p \
         "$image_root/srv" \
         "$image_root/opt/openshell/bin" \
-        "$image_root/sandbox" \
         "$image_root/etc"
 
     cp /srv/openshell-vm-sandbox-init.sh "$image_root/srv/openshell-vm-sandbox-init.sh"
@@ -134,13 +128,6 @@ ensure_target_runtime() {
             printf 'sandbox:!:20123:0:99999:7:::\n' >> "$image_root/etc/shadow"
         fi
     fi
-    local owner
-    owner="$(sandbox_owner_for_root "$image_root")"
-    if ! chown -R "$owner" "$image_root/sandbox" 2>/dev/null; then
-        ts "FATAL: failed to apply sandbox image ownership (${owner})"
-        exit 1
-    fi
-    chmod 0755 "$image_root/sandbox"
 }
 
 prepare_guest_image_rootfs() {
@@ -316,33 +303,6 @@ reconcile_sandbox_account() {
     ts "reconciled sandbox account (${sandbox_uid}:${sandbox_gid})"
 }
 
-setup_sandbox_workdir() {
-    local sandbox_dir
-    local owner
-    local current_owner
-    sandbox_dir="$(root_path /sandbox)"
-    # setup_workdir_link may have made /sandbox a link to the image WORKDIR on
-    # an earlier boot of this overlay; chmod would follow it to the WORKDIR.
-    if [ -L "$sandbox_dir" ]; then
-        ts "/sandbox is a link to $(readlink "$sandbox_dir"); leaving it as is"
-        return 0
-    fi
-    owner="$(sandbox_owner)"
-    mkdir -p "$sandbox_dir"
-    current_owner="$(stat -c '%u:%g' "$sandbox_dir" 2>/dev/null || true)"
-    if [ "$owner" = "10001:10001" ]; then
-        ts "preserving legacy sandbox ownership (10001:10001)"
-    fi
-    if [ "$current_owner" != "$owner" ]; then
-        if ! chown -R "$owner" "$sandbox_dir" 2>/dev/null; then
-            ts "FATAL: failed to apply sandbox ownership (${owner})"
-            exit 1
-        fi
-    fi
-    chmod 0755 "$sandbox_dir"
-    ts "prepared /sandbox ownership (${owner})"
-}
-
 # Create the image's WORKDIR (OPENSHELL_VM_WORKDIR, set by the driver from the
 # image configuration) and make it writable by the sandbox user, as a container
 # runtime does for the directory it starts the workload in. The path comes from
@@ -390,12 +350,33 @@ setup_image_workdir() {
     ts "prepared image WORKDIR ${workdir} (${owner})"
 }
 
+# Point the sandbox account's passwd home at the workdir, matching the HOME the
+# supervisor gives the workload, so tools that read the home from passwd agree
+# with it. Without a workdir it stays /sandbox, the supervisor's own fallback.
+# Only the account OpenShell created (its description is "OpenShell Sandbox")
+# is changed; an image's own sandbox account keeps its home.
+setup_sandbox_home() {
+    local home="${1:-/sandbox}"
+    local passwd
+    passwd="$(root_path /etc/passwd)"
+    [ -f "$passwd" ] || return 0
+    if ! awk -F: -v OFS=: -v home="$home" \
+        '$1 == "sandbox" && $5 == "OpenShell Sandbox" { $6 = home } { print }' \
+        "$passwd" >"$passwd.openshell"; then
+        rm -f "$passwd.openshell"
+        ts "FATAL: failed to set the sandbox account's home"
+        exit 1
+    fi
+    mv "$passwd.openshell" "$passwd"
+}
+
 # Make the operator's default workdir (OPENSHELL_VM_WORKDIR_LINK, from the
 # driver's OPENSHELL_VM_DEFAULT_WORKDIR) a symlink to the image's WORKDIR, so
 # tools that expect the default location find the workload's files when the
 # image chose another directory. The driver sets it only when the two differ
-# and neither contains the other. Best effort: missing parents are created, an
-# empty directory (such as the /sandbox init itself creates) is replaced, and
+# and neither contains the other; when they are the same, setup_image_workdir
+# creates the directory instead. Best effort: missing parents are created, an
+# empty directory (an image's, or one left by an older init) is replaced, and
 # anything else at the path belongs to the image and is left alone. Parents
 # that are symlinks are not followed, as in setup_image_workdir.
 setup_workdir_link() {
@@ -596,9 +577,9 @@ run_post_overlay_setup() {
     unset OPENSHELL_VM_WORKDIR_LINK
 
     reconcile_sandbox_account
-    setup_sandbox_workdir
     setup_image_workdir
     setup_workdir_link "$workdir_link" "$workdir"
+    setup_sandbox_home "$workdir"
 
     configure_hostname
     configure_hosts
@@ -623,26 +604,6 @@ EOF
 
 export HOME=/sandbox
 export USER=sandbox
-
-# Fix /sandbox ownership. The host-side CLI extracts OCI layers as a non-root
-# user (e.g. UID 501 on macOS), so /sandbox may be owned by the host UID.
-#
-# On macOS (Hypervisor.framework), guest root has real root privileges and
-# chown succeeds. On Linux non-root hosts with virtiofs, guest root maps to
-# the host user, so chown is denied — this is non-fatal because the
-# supervisor's own filesystem preparation handles the paths that matter.
-if [ -d /sandbox ]; then
-    _sb_uid=$(id -u sandbox 2>/dev/null || true)
-    _sb_gid=$(id -g sandbox 2>/dev/null || true)
-    if [ -n "$_sb_uid" ] && [ -n "$_sb_gid" ]; then
-        _cur_uid=$(stat -c '%u' /sandbox 2>/dev/null || true)
-        if [ -n "$_cur_uid" ] && [ "$_cur_uid" != "$_sb_uid" ]; then
-            ts "fixing /sandbox ownership (was uid=${_cur_uid}, setting to sandbox=${_sb_uid}:${_sb_gid})"
-            chown -R "${_sb_uid}:${_sb_gid}" /sandbox 2>/dev/null || \
-                ts "chown /sandbox denied (virtiofs rootless host), continuing"
-        fi
-    fi
-fi
 
 run_openshell_init_dropins
 

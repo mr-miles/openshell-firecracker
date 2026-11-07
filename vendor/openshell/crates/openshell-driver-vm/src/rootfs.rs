@@ -576,7 +576,6 @@ fn prepare_sandbox_rootfs(
     fs::write(opt_dir.join(".rootfs-type"), "sandbox\n")
         .map_err(|e| format!("write sandbox rootfs marker: {e}"))?;
     ensure_sandbox_guest_user(rootfs, sandbox_uid, sandbox_gid)?;
-    create_sandbox_mountpoint(&rootfs.join("sandbox"))?;
     create_sandbox_mountpoint(&rootfs.join("image-cache"))?;
     create_sandbox_mountpoint(&rootfs.join("lower"))?;
     create_sandbox_mountpoint(&rootfs.join("overlay"))?;
@@ -1320,8 +1319,11 @@ mod tests {
         assert!(!init_script.contains("--library-path"));
         assert!(!init_script.contains("\"$loader\""));
         assert!(!init_script.contains("ld-linux"));
-        assert!(init_script.contains("    reconcile_sandbox_account\n    setup_sandbox_workdir"));
-        assert!(init_script.contains("    setup_sandbox_workdir\n    setup_image_workdir"));
+        assert!(init_script.contains("    reconcile_sandbox_account\n    setup_image_workdir"));
+        assert!(init_script.contains(
+            "    setup_image_workdir\n    setup_workdir_link \"$workdir_link\" \"$workdir\""
+        ));
+        assert!(!init_script.contains("setup_sandbox_workdir"));
         assert!(
             init_script
                 .contains("chown \"${_sandbox_uid}:${_sandbox_gid}\" \"$_sandbox_state_dir\"")
@@ -1331,17 +1333,12 @@ mod tests {
         assert!(!init_script.contains("@ISOLATION_INTERFACE_VERSION@"));
         assert!(!init_script.contains("8.8.8.8"));
         assert!(!init_script.contains("VM_NET_"));
-        assert!(rootfs.join("sandbox").is_dir());
+        // The workdir is created at boot from the image or the driver default.
+        assert!(!rootfs.join("sandbox").exists());
         assert!(rootfs.join("image-cache").is_dir());
         assert!(rootfs.join("lower").is_dir());
         assert!(rootfs.join("overlay").is_dir());
         assert!(rootfs.join("newroot").is_dir());
-        assert!(
-            fs::read_dir(rootfs.join("sandbox"))
-                .expect("read sandbox")
-                .next()
-                .is_none()
-        );
         let passwd = fs::read_to_string(rootfs.join("etc/passwd")).expect("read passwd");
         assert!(passwd.contains(&format!(
             "sandbox:x:{uid}:{uid}:OpenShell Sandbox:/sandbox:/bin/bash"

@@ -15,8 +15,9 @@ Changes from upstream:
   and applied to the workload. The environment is layered image, then template, then spec.
   The workdir is created in the guest, handed to the sandbox user, and passed to the
   supervisor as `--workdir`, which also makes it writable under the filesystem policy. An
-  image with no `WORKDIR` starts in `/` and the driver warns, unless
-  `OPENSHELL_VM_DEFAULT_WORKDIR` supplies one. See `src/image_config.rs`.
+  image with no `WORKDIR` starts in `OPENSHELL_VM_DEFAULT_WORKDIR` (default `/sandbox`);
+  an image `WORKDIR` elsewhere gets the default as a symlink to it, and the sandbox
+  account OpenShell creates has the workdir as its home. See `src/image_config.rs`.
 - **Launcher option.** `OPENSHELL_VM_LAUNCHER_BIN` selects the launcher executable.
 - **Supervisor identity** (off by default, `OPENSHELL_VM_SUPERVISOR_IDENTITY`). The driver
   serves the JWT half of the SPIFFE Workload API on a socket in each sandbox's state
