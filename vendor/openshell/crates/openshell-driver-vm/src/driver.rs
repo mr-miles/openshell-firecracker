@@ -2137,8 +2137,7 @@ impl VmDriver {
                 .arg("--vm-env")
                 .arg(format!("{GUEST_WORKDIR_ENV}={workdir}"));
         }
-        if let Some(link) =
-            workdir_link(self.config.default_workdir.as_deref(), workdir.as_deref())
+        if let Some(link) = workdir_link(self.config.default_workdir.as_deref(), workdir.as_deref())
         {
             // Guest init points the operator's default workdir at the image's.
             command
@@ -13673,7 +13672,10 @@ while :; do sleep 0.05; done"#,
         assert_eq!(workdir_link(Some("/sandbox"), None), None);
         // Nesting either way would hide the workdir or loop into it.
         assert_eq!(workdir_link(Some("/sandbox"), Some("/sandbox/app")), None);
-        assert_eq!(workdir_link(Some("/srv/app/sandbox"), Some("/srv/app")), None);
+        assert_eq!(
+            workdir_link(Some("/srv/app/sandbox"), Some("/srv/app")),
+            None
+        );
         // A shared prefix is not nesting.
         assert_eq!(
             workdir_link(Some("/sandbox"), Some("/sandbox-app")).as_deref(),
