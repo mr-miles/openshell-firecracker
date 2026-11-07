@@ -65,6 +65,15 @@ release, so run a `v0.1.7` gateway. Other releases have not been checked. `insta
 the commit the installed driver was built from and the gateway's reported version, and leaves
 the comparison to you.
 
+**Trying an OpenShell change against this driver.** To test a supervisor change without
+re-vendoring the driver, set `OPENSHELL_RUNTIME_COMMIT` (and `OPENSHELL_RUNTIME_REPO` for a
+fork) in [`driver/UPSTREAM.env`](driver/UPSTREAM.env). The release build then compiles the
+embedded host supervisor, guest sandbox and guest init from that revision, while the vendored
+driver crate keeps the pin, so `driver:check-pin` still passes and the gateway must still match
+the pin. The package records the revision in `openshell-runtime-commit.txt`, and `install.sh`
+warns when it installs such a build. The change must stay protocol-compatible with the pin:
+base it on the pinned commit. This is for testing only; never tag a release with it set.
+
 **Trying another OpenShell version.** [`driver/update-pin.sh`](driver/update-pin.sh) moves the
 pin to a release tag and edits all three places it lives (`driver/UPSTREAM.env`, the `rev`s in
 `vendor/openshell/Cargo.toml`, and `Cargo.lock`), then type-checks the driver against it and
