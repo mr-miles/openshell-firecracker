@@ -17,6 +17,8 @@ pub mod allocation_tracking;
 #[cfg(feature = "compute-driver")]
 pub mod driver;
 #[cfg(feature = "compute-driver")]
+mod image_cache_gc;
+#[cfg(feature = "compute-driver")]
 mod image_config;
 #[cfg(feature = "compute-driver")]
 mod isolation;

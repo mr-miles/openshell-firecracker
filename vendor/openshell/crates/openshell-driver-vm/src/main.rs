@@ -268,6 +268,16 @@ struct Args {
         default_value_t = openshell_driver_vm::sandbox_storage::DEFAULT_MAX_FILES_BYTES
     )]
     files_max_bytes: u64,
+
+    /// Hours after its last use that an image cache entry no sandbox references
+    /// is removed. Entries from other driver builds go at once. 0 keeps every
+    /// entry.
+    #[arg(
+        long,
+        env = "OPENSHELL_VM_IMAGE_CACHE_MAX_IDLE_HOURS",
+        default_value_t = openshell_driver_vm::driver::DEFAULT_IMAGE_CACHE_MAX_IDLE_HOURS
+    )]
+    image_cache_max_idle_hours: u64,
 }
 
 #[tokio::main]
@@ -359,6 +369,7 @@ async fn main() -> Result<()> {
             files_root: args.files_root.clone(),
             max_files_bytes: args.files_max_bytes,
         },
+        image_cache_max_idle_hours: args.image_cache_max_idle_hours,
     })
     .await
     .map_err(|err| miette::miette!("{err}"))?;

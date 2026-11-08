@@ -32,6 +32,12 @@ Changes from upstream:
   guest: the driver stages them in the overlay's upper layer and a guest init drop-in copies
   them into place with the requested owner and mode. See `src/sandbox_storage.rs` and
   "Per-sandbox disk size and files" in the repository README.
+- **Image cache cleanup.** Upstream never deletes a prepared disk. When the driver starts
+  and after each sandbox start, stop or delete, it removes cache entries no sandbox
+  references: those from other driver builds at once, and its own build's once unused for
+  `OPENSHELL_VM_IMAGE_CACHE_MAX_IDLE_HOURS` (default 48; 0 turns cleanup off). Provisioning
+  holds an image-use lock shared, and cleanup takes it exclusively along with
+  `preparation.lock`. See `src/image_cache_gc.rs`.
 - **Graceful shutdown.** On SIGTERM or Ctrl-C, `VmDriver::shutdown` refuses new launches
   and stops every running VM the way `StopSandbox` does, but without the stop marker and with
   the exit monitor detached, so the next start relaunches those sandboxes. Then watch

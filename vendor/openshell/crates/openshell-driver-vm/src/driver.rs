@@ -10,6 +10,7 @@ mod preparation;
 #[path = "registry_cache_tests.rs"]
 mod registry_cache_tests;
 
+use crate::image_cache_gc;
 use crate::image_config::{ImageRuntimeConfig, layered_environment, validate_default_working_dir};
 
 use crate::isolation::VmBoundarySpec;
@@ -405,6 +406,13 @@ pub struct VmDriverConfig {
     /// upstream).
     #[serde(default)]
     pub sandbox_storage: crate::sandbox_storage::SandboxStorageConfig,
+
+    /// Remove image cache entries no sandbox references once unused this many
+    /// hours, and entries from other driver builds at once (not in upstream).
+    /// 0 disables removal; [`VmDriverConfig::default`] leaves it off and the
+    /// driver binary defaults to [`DEFAULT_IMAGE_CACHE_MAX_IDLE_HOURS`].
+    #[serde(default)]
+    pub image_cache_max_idle_hours: u64,
 }
 
 /// Redacting `Debug` so a proxy URL or credential path never reaches a log.
@@ -471,6 +479,10 @@ impl std::fmt::Debug for VmDriverConfig {
             .field("default_workdir", &self.default_workdir)
             .field("supervisor_identity", &self.supervisor_identity)
             .field("sandbox_storage", &self.sandbox_storage)
+            .field(
+                "image_cache_max_idle_hours",
+                &self.image_cache_max_idle_hours,
+            )
             .finish()
     }
 }
@@ -478,6 +490,10 @@ impl std::fmt::Debug for VmDriverConfig {
 /// Fallback sandbox UID for images without a `sandbox` account and partial
 /// operator identity overrides.
 pub const DEFAULT_SANDBOX_UID: u32 = 1000;
+
+/// Hours an unreferenced image cache entry is kept after its last use, unless
+/// `OPENSHELL_VM_IMAGE_CACHE_MAX_IDLE_HOURS` says otherwise.
+pub const DEFAULT_IMAGE_CACHE_MAX_IDLE_HOURS: u64 = 48;
 
 impl Default for VmDriverConfig {
     fn default() -> Self {
@@ -514,6 +530,7 @@ impl Default for VmDriverConfig {
             default_workdir: None,
             supervisor_identity: crate::supervisor_identity::SupervisorIdentityConfig::default(),
             sandbox_storage: crate::sandbox_storage::SandboxStorageConfig::default(),
+            image_cache_max_idle_hours: 0,
         }
     }
 }
@@ -1139,6 +1156,9 @@ pub struct VmDriver {
     launcher_bin: PathBuf,
     registry: Arc<Mutex<HashMap<String, SandboxRecord>>>,
     image_cache_lock: Arc<Mutex<()>>,
+    /// Shared while a sandbox provisions (it resolves and records its images);
+    /// exclusive while unused image cache entries are removed (not in upstream).
+    image_cache_use: Arc<tokio::sync::RwLock<()>>,
     preparation_root: Option<PathBuf>,
     events: broadcast::Sender<WatchSandboxesEvent>,
     lifecycle_extensions: Arc<LifecycleExtensionRegistry>,
@@ -1287,6 +1307,7 @@ impl VmDriver {
             launcher_bin,
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(lifecycle_extensions),
@@ -1296,6 +1317,9 @@ impl VmDriver {
         preparation::reconcile(&image_cache_root_dir(&driver.config.state_dir))
             .map_err(|error| format!("reconcile image preparation staging: {error}"))?;
         driver.restore_persisted_sandboxes().await;
+        // Skipped if a restored sandbox is already provisioning; the last one
+        // to finish runs it instead.
+        driver.schedule_image_cache_gc();
         Ok(driver)
     }
 
@@ -1870,8 +1894,11 @@ impl VmDriver {
         overlay_preparation: OverlayPreparation,
     ) {
         let sandbox_id = sandbox.id.clone();
-        if let Err(err) = self
-            .provision_sandbox_inner(
+        // Image cache cleanup waits while this sandbox resolves and records its
+        // images, then runs once it is done.
+        let result = {
+            let _image_use = self.image_cache_use.clone().read_owned().await;
+            self.provision_sandbox_inner(
                 sandbox,
                 image_ref,
                 state_dir.clone(),
@@ -1879,7 +1906,9 @@ impl VmDriver {
                 overlay_preparation,
             )
             .await
-        {
+        };
+        self.schedule_image_cache_gc();
+        if let Err(err) = result {
             tracing::Span::current().record("otel.status_code", "ERROR");
             if err.code() == tonic::Code::Cancelled {
                 if overlay_preparation == OverlayPreparation::Fresh {
@@ -1976,6 +2005,11 @@ impl VmDriver {
             .await?
         };
         let image_identity = image_plan.image_identity.clone();
+        self.note_image_use(ImageUse::Provisioned {
+            image: image_identity.clone(),
+            bootstrap: image_plan.bootstrap_image_identity.clone(),
+        })
+        .await;
         // What the image declares for its workload (ENV, WORKDIR). It is stored
         // beside the prepared disk, so a restart finds it the same way.
         let image_runtime_config =
@@ -2456,7 +2490,103 @@ impl VmDriver {
             record_id,
             platform_event("vm", "Normal", "Stopped", "VM sandbox stopped".to_string()),
         );
+        self.note_image_use(ImageUse::Sandbox(state_dir)).await;
+        self.schedule_image_cache_gc();
         Ok(())
+    }
+
+    /// Record a use of image cache entries, which restarts their idle time in
+    /// [`crate::image_cache_gc`] (not in upstream). Best effort: a failure is
+    /// logged and only leaves the previous use as the last one.
+    async fn note_image_use(&self, image_use: ImageUse) {
+        if self.config.image_cache_max_idle_hours == 0 {
+            return;
+        }
+        let cache_root = image_cache_root_dir(&self.config.state_dir);
+        let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let now = std::time::SystemTime::now();
+            let (image, bootstrap) = match image_use {
+                ImageUse::Provisioned { image, bootstrap } => {
+                    let bootstrap = sanitize_image_identity(&bootstrap);
+                    image_cache_gc::record_current_bootstrap(&cache_root, &bootstrap)?;
+                    (Some(sanitize_image_identity(&image)), Some(bootstrap))
+                }
+                ImageUse::Sandbox(state_dir) => (
+                    image_cache_gc::sandbox_entry(&state_dir)?,
+                    image_cache_gc::read_current_bootstrap(&cache_root)?,
+                ),
+            };
+            for name in image.iter().chain(bootstrap.iter()) {
+                image_cache_gc::mark_used(&cache_root, name, now)?;
+            }
+            Ok(())
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!(%error, "vm driver: could not record image cache use"),
+            Err(error) => warn!(%error, "vm driver: image cache use task failed"),
+        }
+    }
+
+    /// Remove unused image cache entries in the background (not in upstream).
+    /// Skipped while a sandbox provisions: it holds the image-use lock shared
+    /// and schedules another pass when it finishes.
+    fn schedule_image_cache_gc(&self) {
+        let hours = self.config.image_cache_max_idle_hours;
+        if hours == 0 {
+            return;
+        }
+        let Ok(guard) = self.image_cache_use.clone().try_write_owned() else {
+            return;
+        };
+        let cache_root = image_cache_root_dir(&self.config.state_dir);
+        let sandboxes_root = sandboxes_root_dir(&self.config.state_dir);
+        let current_prefixes = current_image_cache_prefixes(&self.config);
+        let max_idle = Duration::from_secs(hours.saturating_mul(3600));
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            // Image preparation workers publish entries under this lock.
+            let _cache_lock = match preparation::cache_lock(&cache_root) {
+                Ok(lock) => lock,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => {
+                    warn!(%error, "vm driver: image cache cleanup could not lock the cache");
+                    return;
+                }
+            };
+            let report = match image_cache_gc::collect(&image_cache_gc::Policy {
+                cache_root: &cache_root,
+                sandboxes_root: &sandboxes_root,
+                current_prefixes: &current_prefixes,
+                max_idle,
+                now: std::time::SystemTime::now(),
+            }) {
+                Ok(report) => report,
+                Err(error) => {
+                    warn!(%error, "vm driver: image cache cleanup skipped");
+                    return;
+                }
+            };
+            for removed in &report.removed {
+                info!(
+                    image_cache_entry = %removed.name,
+                    bytes = removed.bytes,
+                    reason = if removed.other_build { "other driver build" } else { "unused" },
+                    "vm driver: removed image cache entry"
+                );
+            }
+            for (name, error) in &report.failed {
+                warn!(image_cache_entry = %name, %error, "vm driver: could not clean image cache entry");
+            }
+            if !report.removed.is_empty() {
+                info!(
+                    removed = report.removed.len(),
+                    kept = report.kept,
+                    "vm driver: image cache cleanup finished"
+                );
+            }
+        });
     }
 
     fn shutdown_phase(&self) -> ShutdownPhase {
@@ -2765,6 +2895,8 @@ impl VmDriver {
             .after_delete(&sandbox_snapshot, &state_dir)
             .await;
 
+        self.note_image_use(ImageUse::Sandbox(state_dir.clone()))
+            .await;
         remove_sandbox_state_dir(&self.config.state_dir, &state_dir).await?;
         remove_sandbox_socket_dir(&self.socket_root_fd, &record_id);
 
@@ -2774,6 +2906,7 @@ impl VmDriver {
         }
 
         self.publish_deleted(record_id);
+        self.schedule_image_cache_gc();
         span_status.finish(Ok(DeleteSandboxResponse { deleted: true }))
     }
 
@@ -5221,6 +5354,7 @@ pub async fn run_image_preparation_worker(request_path: &Path) -> Result<(), Str
         launcher_bin,
         registry: Arc::new(Mutex::new(HashMap::new())),
         image_cache_lock: Arc::new(Mutex::new(())),
+        image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
         preparation_root: Some(directory),
         events,
         lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -7080,8 +7214,13 @@ fn bootstrap_image_cache_identity(image_identity: &str) -> String {
     // Bound new cache/staging filenames even for long source digests such as
     // SHA-512. Persisted identities still use the unchanged path lookup.
     let image_identity = compute_bytes_sha256_hex(image_identity.as_bytes());
+    format!("{}{image_identity}", bootstrap_image_cache_prefix())
+}
+
+/// The part of every bootstrap cache identity this driver build creates.
+fn bootstrap_image_cache_prefix() -> String {
     format!(
-        "{BOOTSTRAP_IMAGE_CACHE_LAYOUT_VERSION}:openshell-{}:guest-{}:{image_identity}",
+        "{BOOTSTRAP_IMAGE_CACHE_LAYOUT_VERSION}:openshell-{}:guest-{}:",
         crate::VERSION,
         sandbox_guest_runtime_identity()
     )
@@ -7096,14 +7235,28 @@ fn configured_sandbox_identity(config: &VmDriverConfig) -> Option<(u32, u32)> {
 
 fn prepared_image_cache_identity(image_identity: &str, config: &VmDriverConfig) -> String {
     let image_identity = compute_bytes_sha256_hex(image_identity.as_bytes());
+    format!("{}{image_identity}", prepared_image_cache_prefix(config))
+}
+
+/// The part of every prepared cache identity this driver build creates with
+/// `config`.
+fn prepared_image_cache_prefix(config: &VmDriverConfig) -> String {
     let identity = configured_sandbox_identity(config).map_or_else(
         || "image-account".to_string(),
         |(uid, gid)| format!("configured-{uid}-{gid}"),
     );
     format!(
-        "{PREPARED_IMAGE_CACHE_LAYOUT_VERSION}:openshell-{}:{identity}:{image_identity}",
+        "{PREPARED_IMAGE_CACHE_LAYOUT_VERSION}:openshell-{}:{identity}:",
         crate::VERSION
     )
+}
+
+/// Sanitized name prefixes of the image cache entries this driver build creates.
+fn current_image_cache_prefixes(config: &VmDriverConfig) -> Vec<String> {
+    vec![
+        sanitize_image_identity(&bootstrap_image_cache_prefix()),
+        sanitize_image_identity(&prepared_image_cache_prefix(config)),
+    ]
 }
 
 fn registry_layer_download_concurrency() -> usize {
@@ -7120,17 +7273,16 @@ fn registry_layer_download_concurrency_value(value: Option<&str>) -> usize {
         })
 }
 
+/// Which image cache entries a sandbox used (not in upstream).
+enum ImageUse {
+    /// Provisioning resolved these cache identities.
+    Provisioned { image: String, bootstrap: String },
+    /// The sandbox in this state directory stopped or is being deleted.
+    Sandbox(PathBuf),
+}
+
 fn sanitize_image_identity(image_identity: &str) -> String {
-    image_identity
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect()
+    image_cache_gc::sanitize_identity(image_identity)
 }
 
 fn unique_image_cache_suffix() -> String {
@@ -11193,6 +11345,7 @@ mod tests {
             launcher_bin: PathBuf::from("/tmp/openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -11455,6 +11608,7 @@ mod tests {
             launcher_bin: PathBuf::from("/tmp/openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -11491,6 +11645,7 @@ mod tests {
             launcher_bin: PathBuf::from("/tmp/openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -11521,6 +11676,7 @@ mod tests {
             launcher_bin: PathBuf::from("/tmp/openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -11552,6 +11708,7 @@ mod tests {
             launcher_bin: PathBuf::from("/tmp/openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -11578,6 +11735,7 @@ mod tests {
             launcher_bin: PathBuf::from("/tmp/openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -11601,6 +11759,7 @@ mod tests {
             launcher_bin: PathBuf::from("/tmp/openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -12328,6 +12487,7 @@ mod tests {
             launcher_bin: PathBuf::from("openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -12396,6 +12556,7 @@ mod tests {
             launcher_bin: PathBuf::from("openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -12452,6 +12613,7 @@ mod tests {
             launcher_bin: PathBuf::from("openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -12843,6 +13005,37 @@ mod tests {
             sanitize_image_identity("sha256:abc/def@ghi"),
             "sha256-abc-def-ghi"
         );
+    }
+
+    #[test]
+    fn current_image_cache_prefixes_cover_every_identity_this_build_creates() {
+        let config = VmDriverConfig::default();
+        let prefixes = current_image_cache_prefixes(&config);
+        let is_current = |identity: &str| {
+            let name = sanitize_image_identity(identity);
+            prefixes
+                .iter()
+                .any(|prefix| name.starts_with(prefix.as_str()))
+        };
+        assert!(is_current(&bootstrap_image_cache_identity("sha256:boot")));
+        assert!(is_current(&prepared_image_cache_identity(
+            "sha256:image",
+            &config
+        )));
+        assert!(is_current(&rootfs_tar_cache_identity(
+            &compute_bytes_sha256_hex(b"rootfs"),
+            &config
+        )));
+
+        // Images prepared for another sandbox account are not this build's.
+        let configured = VmDriverConfig {
+            sandbox_uid: Some(2000),
+            ..VmDriverConfig::default()
+        };
+        assert!(!is_current(&prepared_image_cache_identity(
+            "sha256:image",
+            &configured
+        )));
     }
 
     fn unique_temp_dir() -> PathBuf {
@@ -13325,6 +13518,7 @@ while :; do sleep 0.05; done"#,
             launcher_bin: PathBuf::from("openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
@@ -13668,6 +13862,7 @@ while :; do sleep 0.05; done"#,
             launcher_bin: PathBuf::from("openshell-driver-vm"),
             registry: Arc::new(Mutex::new(HashMap::new())),
             image_cache_lock: Arc::new(Mutex::new(())),
+            image_cache_use: Arc::new(tokio::sync::RwLock::new(())),
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(extensions),
