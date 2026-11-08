@@ -276,7 +276,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    const HOUR: Duration = Duration::from_secs(3600);
+    const HOUR: Duration = Duration::from_hours(1);
     const CURRENT_BOOT: &str = "sandbox-bootstrap-rootfs-ext4-v6-openshell-0.2.0-guest-aa-";
     const CURRENT_PREP: &str =
         "sandbox-prepared-rootfs-ext4-umoci-v6-openshell-0.2.0-image-account-";
