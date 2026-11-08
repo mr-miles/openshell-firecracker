@@ -376,7 +376,9 @@ a release.
    ```
 
    `socket_path` is the only key the gateway reads from this table, apart from
-   `allow_driver_config` and `resource_admission`, which it reads for admission. Put
+   `allow_driver_config` and `resource_admission`, which it reads for admission. These two
+   must match the driver's `OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON`; see
+   [Enable driver_config](#enable-driver_config). Put
    `guest_tls_ca` under `[openshell.gateway]`; the gateway rejects `guest_tls_*` keys in a
    driver table.
 5. **Start the driver before the gateway**, and restart the gateway whenever the driver
@@ -423,10 +425,42 @@ spawns; an externally run driver must set the `OPENSHELL_VM_UPSTREAM_PROXY*` and
 ## Per-sandbox disk size and files
 
 A sandbox can set the size of its writable disk and have files copied in from the host,
-through its `driver_config`. Neither is in upstream OpenShell. The gateway forwards only the
-block under the driver's configured name (`firecracker` in
-[`examples/gateway.toml`](examples/gateway.toml)), and only when `allow_driver_config` is
-enabled on both the gateway and the driver (`OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON`):
+through its `driver_config`. Neither is in upstream OpenShell.
+
+### Enable driver_config
+
+Both settings are off by default, because a sandbox's `driver_config` is caller input:
+anyone who can create a sandbox through the gateway can set it. Two components each keep a
+copy of the same admission policy, and both must allow `driver_config`:
+
+1. **The gateway**, in the driver's table of `gateway.toml`. The gateway refuses a
+   non-empty `driver_config` itself unless this is set:
+
+   ```toml
+   [openshell.drivers.firecracker]
+   socket_path = "/run/user/1000/openshell-firecracker/driver.sock"
+   allow_driver_config = true
+   ```
+
+2. **The driver**, in `OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON` in its environment file. The
+   driver checks the request again, and reports its policy to the gateway:
+
+   ```shell
+   OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON='{"allow_driver_config": true}'
+   ```
+
+   Keep the single quotes: systemd's `EnvironmentFile=` removes double quotes from an
+   unquoted value, which would break the JSON.
+
+The two must describe the same policy, `resource_admission` included. The gateway compares
+the driver's reported policy with its own when it connects, and refuses to use the driver
+if they differ ("compute driver admission policy differs from gateway configuration"). So
+change both together: restart the driver first, then the gateway. Leave `resource_admission`
+out of both (the defaults), or set it identically in both.
+
+Then put the settings in a block named after the driver as the gateway knows it
+(`compute_driver = "firecracker"`). The gateway forwards only that block to the driver and
+drops the rest:
 
 ```shell
 openshell sandbox create --driver-config-json '{"firecracker": {
@@ -596,6 +630,11 @@ Limits:
 - The guest environment file sits in the sandbox's own overlay (mode `0600`, root-owned).
   It holds what the driver passes to the guest init.
 - Firecracker's `jailer` is not used.
+- With `allow_driver_config` on, anyone who can create a sandbox can read every file under
+  `OPENSHELL_VM_FILES_ROOT` by copying it into their sandbox, and can ask for a disk up to
+  `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`. Put only what all sandbox users may see in the files
+  root, and keep the maximum within the host's free space: overlays are sparse, so the host
+  disk fills only as guests write, but it can fill.
 
 ## Verification status
 

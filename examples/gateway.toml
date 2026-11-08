@@ -11,3 +11,7 @@ compute_driver = "firecracker"
 [openshell.drivers.firecracker]
 # Must match the socket the driver binds (see the unit's --bind-socket).
 socket_path = "/run/user/1000/openshell-firecracker/driver.sock"
+# Let sandboxes set driver_config (per-sandbox disk size and files; see "Per-sandbox
+# disk size and files" in the README). Off by default. The driver's
+# OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON must say the same, or the gateway refuses it.
+# allow_driver_config = true
