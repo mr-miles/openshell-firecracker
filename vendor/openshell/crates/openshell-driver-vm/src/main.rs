@@ -380,6 +380,14 @@ async fn main() -> Result<()> {
     };
 
     let socket_cleanup = driver.clone();
+    // On SIGTERM or Ctrl-C, stop every VM in order before the server drains,
+    // so a restart of the driver service relaunches the sandboxes instead of
+    // finding them failed (see `VmDriver::shutdown`).
+    let shutdown_driver = driver.clone();
+    let shutdown = async move {
+        shutdown_signal().await;
+        shutdown_driver.shutdown().await;
+    };
     let result = match listen_mode {
         ComputeDriverListenMode::Unix {
             socket_path,
@@ -395,7 +403,7 @@ async fn main() -> Result<()> {
                 .add_service(ComputeDriverServer::new(driver))
                 .serve_with_incoming_shutdown(
                     AuthenticatedUnixIncoming::new(listener, expected_peer_pid),
-                    shutdown_signal(),
+                    shutdown,
                 )
                 .await
                 .into_diagnostic();
@@ -407,7 +415,7 @@ async fn main() -> Result<()> {
             tonic::transport::Server::builder()
                 .layer(openshell_otel::compute_driver_rpc_layer())
                 .add_service(ComputeDriverServer::new(driver))
-                .serve_with_shutdown(bind_address, shutdown_signal())
+                .serve_with_shutdown(bind_address, shutdown)
                 .await
                 .into_diagnostic()
         }
