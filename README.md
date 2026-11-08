@@ -419,6 +419,8 @@ The driver's `OPENSHELL_VM_SUPERVISOR_IDENTITY*` options (optional, off by defau
 The driver's `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`, `OPENSHELL_VM_FILES_ROOT` and
 `OPENSHELL_VM_FILES_MAX_BYTES` limit what a sandbox can request in its `driver_config`; see
 [Per-sandbox disk size and files](#per-sandbox-disk-size-and-files).
+The driver's `OPENSHELL_VM_IMAGE_CACHE_MAX_IDLE_HOURS` (default 48, 0 to keep everything)
+sets when unused image disks are removed; see [Image cache cleanup](#image-cache-cleanup).
 
 The driver itself needs `OPENSHELL_GRPC_ENDPOINT` (required), `OPENSHELL_VM_TLS_CA` for an
 `https://` endpoint, `OPENSHELL_VM_DRIVER_STATE_DIR`, at least one of
@@ -514,6 +516,28 @@ again. The files are copies, not mounts: changes on the host reach the guest onl
 
 The sandbox policy still governs what the workload can access. Add a target outside the
 workdir to the policy's filesystem paths if the workload needs to read or write it.
+
+## Image cache cleanup
+
+The driver keeps the disks it prepares in `$OPENSHELL_VM_DRIVER_STATE_DIR/images/`: one
+bootstrap root disk, plus one disk for each sandbox image. Each folder's name includes the
+driver version, so every upgrade, and every rebuild with a new version string, prepares a
+new set. Upstream never deletes them. This driver removes them:
+
+- **Kept:** the image a sandbox uses, for as long as the sandbox exists, running or stopped,
+  so starting a stopped sandbox does not have to pull and build its image again. Also kept:
+  the bootstrap disk the driver last used (`images/current-bootstrap`).
+- **Removed at once:** disks from other driver builds that no sandbox refers to.
+- **Removed when idle:** disks from this build that no sandbox refers to, once
+  `OPENSHELL_VM_IMAGE_CACHE_MAX_IDLE_HOURS` (default 48) have passed since their last use.
+  Starting, stopping or deleting a sandbox counts as a use of its image and of the bootstrap
+  disk (`last-used` in the folder). A disk without that file counts from when it was built.
+
+Cleanup runs when the driver starts and after each sandbox start, stop or delete. It waits
+until no sandbox is provisioning and logs each folder it removes. Set the variable to `0` to
+turn cleanup off. A stopped sandbox from an older build keeps its old image until it next
+starts. Starting it prepares the image for the current build, and the old disk then counts
+as unreferenced.
 
 ## Per-VM uid
 
@@ -651,6 +675,7 @@ Limits:
 | End to end on one real host | `openshell sandbox create` boots a Firecracker sandbox: the release-built Linux 6.18 guest kernel (with `# CONFIG_ACPI is not set`), the jail, image preparation, the gateway-to-driver socket and the supervisor connection all worked. Needed fixes along the way are in the git history (`/dev/fd` links, `gateway.toml` schema version and socket path) |
 | Vendored driver | **Not booted.** The end-to-end result above was with OpenShell's v0.1.6 driver plus a launcher-override patch, before the driver was vendored. The vendored driver (`v0.1.7`, with `ENV`/`WORKDIR` and the removals) passes its unit tests and builds, but has not run a sandbox. The release packaging (`driver:package`, `driver/stage-runtime.sh`) has not been run end to end either: only its source fetch and umoci download were checked |
 | Supervisor identity | Unit tests, including one that starts a stand-in supervisor from the hard link and has it fetch, verify and validate a JWT-SVID over the socket with the `spiffe` client the real supervisor uses, and a driver smoke test of the JWKS endpoints. Not run with a real supervisor or token service |
+| Image cache cleanup | Unit tests of the cleanup rules (`image_cache_gc.rs`), compiled and run on their own. The driver hooks (start, stop, delete, startup) are checked only by the driver's unit tests in CI. Not run against a real state directory |
 | Not checked on that host | The sub-uid isolation path (`OPENSHELL_VM_FIRECRACKER_SUBUIDS`), the AppArmor profile in `install.sh`, the guest clock, long-running or concurrent sandboxes, image `ENV`/`WORKDIR` in a real guest, and OpenShell's conformance suite (`tests/suites/conformance` in the OpenShell repository), which is what would show parity with other drivers |
 | Other hosts | One Ubuntu-style x86_64 host only; no arm64 |
 
