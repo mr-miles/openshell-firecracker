@@ -1776,7 +1776,7 @@ mod tests {
                 ("0".to_string(), Some(host.clone())),
                 ("1".to_string(), None),
                 ("1/sub dir".to_string(), None),
-                ("1/sub dir/f".to_string(), Some(host.clone())),
+                ("1/sub dir/f".to_string(), Some(host)),
             ],
         )
         .expect("write tree");
