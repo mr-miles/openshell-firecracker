@@ -367,6 +367,89 @@ pub fn set_rootfs_image_file_mode(
     )
 }
 
+/// Write a tree of files into an ext4 image in one `debugfs` session.
+///
+/// `guest_dir` is created, along with any missing ancestors, and must not
+/// exist yet. `entries` are `/`-separated paths relative to it, each parent
+/// before its children: `Some(host file)` is copied, `None` is a directory.
+/// Ownership and modes are left to the caller.
+pub fn write_rootfs_image_tree(
+    image_path: &Path,
+    guest_dir: &str,
+    entries: &[(String, Option<PathBuf>)],
+) -> Result<(), String> {
+    let quote = |path: &str| {
+        debugfs_quote_absolute_path(path)
+            .ok_or_else(|| format!("invalid debugfs guest path '{path}'"))
+    };
+    if ext4_image_has_directory(image_path, guest_dir)? {
+        return Err(format!(
+            "'{guest_dir}' already exists in {}",
+            image_path.display()
+        ));
+    }
+    let mut commands = Vec::new();
+    let mut current = String::new();
+    let mut missing = false;
+    for part in guest_dir.split('/').filter(|part| !part.is_empty()) {
+        current.push('/');
+        current.push_str(part);
+        // Once one ancestor is missing, none below it can exist.
+        missing = missing || !ext4_image_has_directory(image_path, &current)?;
+        if missing {
+            commands.push(format!("mkdir {}", quote(&current)?));
+        }
+    }
+    for (relative, host_file) in entries {
+        let guest = quote(&format!("{guest_dir}/{relative}"))?;
+        match host_file {
+            Some(host) => {
+                let host = debugfs_quote_argument(&host.to_string_lossy())
+                    .ok_or_else(|| format!("invalid host path '{}'", host.display()))?;
+                commands.push(format!("write {host} {guest}"));
+            }
+            None => commands.push(format!("mkdir {guest}")),
+        }
+    }
+    run_debugfs_batch_checked(image_path, &commands)
+}
+
+/// Run a `debugfs` batch and fail if any command in it failed. `debugfs -f`
+/// exits 0 regardless; a failed command is reported only on stderr, after the
+/// version banner.
+fn run_debugfs_batch_checked(image_path: &Path, commands: &[String]) -> Result<(), String> {
+    let command_path = temporary_injection_path(image_path);
+    let mut contents = commands.join("\n");
+    contents.push('\n');
+    fs::write(&command_path, contents)
+        .map_err(|e| format!("write {}: {e}", command_path.display()))?;
+    let output = e2fs_command("debugfs").and_then(|mut command| {
+        command
+            .arg("-w")
+            .arg("-f")
+            .arg(&command_path)
+            .arg(image_path)
+            .output()
+            .map_err(|error| format!("run debugfs: {error}"))
+    });
+    let _ = fs::remove_file(&command_path);
+    let output = output?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let failures: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with("debugfs "))
+        .collect();
+    if output.status.success() && failures.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "debugfs batch failed for {} with status {}: {}",
+        image_path.display(),
+        output.status,
+        failures.join("; ")
+    ))
+}
+
 /// Replay the ext4 journal and repair automatically correctable filesystem
 /// state before the driver mutates a preserved guest disk offline.
 pub fn recover_rootfs_image(image_path: &Path) -> Result<(), String> {
@@ -1656,6 +1739,66 @@ mod tests {
         let not_ext4 = dir.join("not-ext4.img");
         fs::write(&not_ext4, vec![0_u8; 64 * 1024]).expect("write non-ext4 image");
         assert!(ext4_image_has_directory(&not_ext4, "/image-rootfs").is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn debugfs_cat(image: &Path, guest_path: &str) -> String {
+        let output = e2fs_command("debugfs")
+            .expect("debugfs")
+            .arg("-R")
+            .arg(format!("cat \"{guest_path}\""))
+            .arg(image)
+            .output()
+            .expect("run debugfs");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    #[test]
+    fn write_rootfs_image_tree_creates_ancestors_directories_and_files() {
+        if e2fs_command("debugfs").is_err() {
+            return;
+        }
+
+        let dir = unique_temp_dir();
+        let source = dir.join("source");
+        let image = dir.join("overlay.ext4");
+        fs::create_dir_all(source.join("upper")).expect("create upperdir");
+        create_ext4_image_from_dir_with_size(&source, &image, 64 * 1024 * 1024)
+            .expect("create ext4 image");
+        let host = dir.join("host file.txt");
+        fs::write(&host, "provisioned\n").expect("write host file");
+
+        write_rootfs_image_tree(
+            &image,
+            "/upper/.stage/gen",
+            &[
+                ("0".to_string(), Some(host.clone())),
+                ("1".to_string(), None),
+                ("1/sub dir".to_string(), None),
+                ("1/sub dir/f".to_string(), Some(host)),
+            ],
+        )
+        .expect("write tree");
+
+        assert!(ext4_image_has_directory(&image, "/upper/.stage/gen/1/sub dir").unwrap());
+        assert_eq!(debugfs_cat(&image, "/upper/.stage/gen/0"), "provisioned\n");
+        assert_eq!(
+            debugfs_cat(&image, "/upper/.stage/gen/1/sub dir/f"),
+            "provisioned\n"
+        );
+
+        // A second generation beside the first reuses the existing ancestors.
+        write_rootfs_image_tree(&image, "/upper/.stage/gen2", &[]).expect("second generation");
+        // The same generation twice, or a missing host file, is an error.
+        assert!(write_rootfs_image_tree(&image, "/upper/.stage/gen", &[]).is_err());
+        let error = write_rootfs_image_tree(
+            &image,
+            "/upper/.stage/gen3",
+            &[("0".to_string(), Some(dir.join("missing")))],
+        )
+        .unwrap_err();
+        assert!(error.contains("debugfs batch failed"), "{error}");
 
         let _ = fs::remove_dir_all(&dir);
     }

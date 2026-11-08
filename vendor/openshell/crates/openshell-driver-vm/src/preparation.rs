@@ -54,6 +54,9 @@ pub(super) struct OverlayRequest {
     pub source_disk: PathBuf,
     pub preparation: OverlayPreparation,
     pub requested_identity: Option<WorkloadIdentitySelectors>,
+    /// The sandbox's requested overlay size; `None` uses the driver default.
+    #[serde(default)]
+    pub overlay_disk_mib: Option<u64>,
 }
 
 /// Keep the requested selectors across the worker boundary. The worker must

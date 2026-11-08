@@ -246,6 +246,28 @@ struct Args {
         default_value_t = openshell_driver_vm::supervisor_identity::DEFAULT_SVID_TTL_SECS
     )]
     supervisor_identity_svid_ttl_secs: u64,
+
+    /// Largest overlay disk a sandbox may request with
+    /// `driver_config.overlay_disk_mib`.
+    #[arg(
+        long,
+        env = "OPENSHELL_VM_MAX_OVERLAY_DISK_MIB",
+        default_value_t = openshell_driver_vm::sandbox_storage::DEFAULT_MAX_OVERLAY_DISK_MIB
+    )]
+    max_overlay_disk_mib: u64,
+
+    /// Host directory that `driver_config.files` sources are read from. Unset,
+    /// sandboxes cannot request files.
+    #[arg(long, env = "OPENSHELL_VM_FILES_ROOT")]
+    files_root: Option<PathBuf>,
+
+    /// Total bytes of files one sandbox may provision.
+    #[arg(
+        long,
+        env = "OPENSHELL_VM_FILES_MAX_BYTES",
+        default_value_t = openshell_driver_vm::sandbox_storage::DEFAULT_MAX_FILES_BYTES
+    )]
+    files_max_bytes: u64,
 }
 
 #[tokio::main]
@@ -331,6 +353,11 @@ async fn main() -> Result<()> {
             issuer: args.supervisor_identity_issuer.clone(),
             jwks_bind: args.supervisor_identity_jwks_bind,
             svid_ttl_secs: args.supervisor_identity_svid_ttl_secs,
+        },
+        sandbox_storage: openshell_driver_vm::sandbox_storage::SandboxStorageConfig {
+            max_overlay_disk_mib: args.max_overlay_disk_mib,
+            files_root: args.files_root.clone(),
+            max_files_bytes: args.files_max_bytes,
         },
     })
     .await

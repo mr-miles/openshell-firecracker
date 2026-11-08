@@ -10,11 +10,12 @@ which the gateway does not start or supervise. The service is OpenShell's VM dri
 the launcher (`src/`) is the program it runs to boot each VM. It is a Firecracker-only
 driver: libkrun, QEMU, GPU passthrough and virtiofs bind mounts are not part of it.
 
-It also differs from OpenShell's driver in two behaviors: a sandbox starts the way a
+It also differs from OpenShell's driver in three behaviors: a sandbox starts the way a
 container does, with the image's `ENV` and in the image's `WORKDIR`
-([Image ENV and WORKDIR](#image-env-and-workdir)); and, if enabled, the driver issues
-SPIFFE JWT-SVIDs to its host supervisors itself, without a SPIRE agent
-([Supervisor identity](#supervisor-identity)).
+([Image ENV and WORKDIR](#image-env-and-workdir)); a sandbox can set its disk size and have
+files copied in from the host ([Per-sandbox disk size and files](#per-sandbox-disk-size-and-files));
+and, if enabled, the driver issues SPIFFE JWT-SVIDs to its host supervisors itself, without
+a SPIRE agent ([Supervisor identity](#supervisor-identity)).
 
 > Status: unit-tested, but the vendored driver has not yet been booted against a real VM.
 > See [Verification status](#verification-status).
@@ -375,7 +376,9 @@ a release.
    ```
 
    `socket_path` is the only key the gateway reads from this table, apart from
-   `allow_driver_config` and `resource_admission`, which it reads for admission. Put
+   `allow_driver_config` and `resource_admission`, which it reads for admission. These two
+   must match the driver's `OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON`; see
+   [Enable driver_config](#enable-driver_config). Put
    `guest_tls_ca` under `[openshell.gateway]`; the gateway rejects `guest_tls_*` keys in a
    driver table.
 5. **Start the driver before the gateway**, and restart the gateway whenever the driver
@@ -406,6 +409,9 @@ The driver's `OPENSHELL_VM_DEFAULT_WORKDIR` (default `/sandbox`) sets the workin
 sandboxes whose image has none ([Image ENV and WORKDIR](#image-env-and-workdir)).
 The driver's `OPENSHELL_VM_SUPERVISOR_IDENTITY*` options (optional, off by default) are in
 [Supervisor identity](#supervisor-identity).
+The driver's `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`, `OPENSHELL_VM_FILES_ROOT` and
+`OPENSHELL_VM_FILES_MAX_BYTES` limit what a sandbox can request in its `driver_config`; see
+[Per-sandbox disk size and files](#per-sandbox-disk-size-and-files).
 
 The driver itself needs `OPENSHELL_GRPC_ENDPOINT` (required), `OPENSHELL_VM_TLS_CA` for an
 `https://` endpoint, `OPENSHELL_VM_DRIVER_STATE_DIR`, at least one of
@@ -415,6 +421,92 @@ The driver itself needs `OPENSHELL_GRPC_ENDPOINT` (required), `OPENSHELL_VM_TLS_
 both sides). The gateway passes its proxy settings and gateway name to a driver it
 spawns; an externally run driver must set the `OPENSHELL_VM_UPSTREAM_PROXY*` and
 `OPENSHELL_GATEWAY_NAME` equivalents itself.
+
+## Per-sandbox disk size and files
+
+A sandbox can set the size of its writable disk and have files copied in from the host,
+through its `driver_config`. Neither is in upstream OpenShell.
+
+### Enable driver_config
+
+Both settings are off by default, because a sandbox's `driver_config` is caller input:
+anyone who can create a sandbox through the gateway can set it. Two components each keep a
+copy of the same admission policy, and both must allow `driver_config`:
+
+1. **The gateway**, in the driver's table of `gateway.toml`. The gateway refuses a
+   non-empty `driver_config` itself unless this is set:
+
+   ```toml
+   [openshell.drivers.firecracker]
+   socket_path = "/run/user/1000/openshell-firecracker/driver.sock"
+   allow_driver_config = true
+   ```
+
+2. **The driver**, in `OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON` in its environment file. The
+   driver checks the request again, and reports its policy to the gateway:
+
+   ```shell
+   OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON='{"allow_driver_config": true}'
+   ```
+
+   Keep the single quotes: systemd's `EnvironmentFile=` removes double quotes from an
+   unquoted value, which would break the JSON.
+
+The two must describe the same policy, `resource_admission` included. The gateway compares
+the driver's reported policy with its own when it connects, and refuses to use the driver
+if they differ ("compute driver admission policy differs from gateway configuration"). So
+change both together: restart the driver first, then the gateway. Leave `resource_admission`
+out of both (the defaults), or set it identically in both.
+
+Then put the settings in a block named after the driver as the gateway knows it
+(`compute_driver = "firecracker"`). The gateway forwards only that block to the driver and
+drops the rest:
+
+```shell
+openshell sandbox create --driver-config-json '{"firecracker": {
+  "overlay_disk_mib": 16384,
+  "files": [
+    {"source": "app/app.toml", "target": "/etc/app/app.toml", "mode": "0640"},
+    {"source": "seed", "target": "/sandbox/seed"},
+    {"source": "certs/ca.pem", "target": "/etc/ssl/app-ca.pem", "owner": "root", "refresh": true}
+  ]}}' ...
+```
+
+**`overlay_disk_mib`** is the size of the sandbox's writable overlay disk, which holds
+everything the workload writes. The default is `OPENSHELL_VM_OVERLAY_DISK_MIB` (4096). A
+request must be between 256 and `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB` (default 65536). The disk
+is a sparse file, so the host spends only what the guest writes. The size is fixed when the
+sandbox is created. Stop and start keep it, because they reuse the same request.
+
+**`files`** copies files and directories from the host into the guest:
+
+| Field | Meaning |
+|---|---|
+| `source` | Required. A path relative to `OPENSHELL_VM_FILES_ROOT`: a file, or a directory that is copied with everything in it. `..` and absolute paths are rejected, and so are symbolic links, both as the source and inside a source directory, so nothing outside the root can be reached |
+| `target` | Required. An absolute guest path. A file replaces what is there; a directory is merged into an existing directory or created. System paths are refused: `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/opt/openshell` and the driver's own files |
+| `owner` | `sandbox` (default), the account the workload runs as, or `root` |
+| `mode` | Octal permission bits for a file source, such as `"0640"`. Default: the host file's bits. Set-user-ID and set-group-ID bits are refused |
+| `refresh` | `false` (default): copy on the sandbox's first launch only. `true`: copy again on every start, replacing the guest's version |
+
+Ownership is fixed up for everything copied in. Missing parent directories of a target are
+created, owned by `owner` with mode `0755`. Each copied directory and file is owned by
+`owner` and keeps the host's permission bits (or `mode`). Directories that already exist,
+such as `/etc`, keep their own owner and mode.
+
+The driver does not start a sandbox whose files cannot be resolved: a missing source, one
+outside the root, or more than `OPENSHELL_VM_FILES_MAX_BYTES` in total (default 256 MiB)
+is rejected when the sandbox is created. Without `OPENSHELL_VM_FILES_ROOT`, requests that
+use `files` are rejected.
+
+How it works: before the VM boots, the driver writes the files that are due into a staging
+directory on the overlay disk. A guest init drop-in then creates the parents, copies each
+entry into place with its owner and mode, and deletes the staging directory, all before the
+workload starts. If a VM fails before its init runs, the next start copies every entry
+again. The files are copies, not mounts: changes on the host reach the guest only through
+`refresh`.
+
+The sandbox policy still governs what the workload can access. Add a target outside the
+workdir to the policy's filesystem paths if the workload needs to read or write it.
 
 ## Per-VM uid
 
@@ -515,7 +607,8 @@ Limits:
 ## What does not work
 
 - No virtiofs bind mounts and no GPU passthrough on Firecracker. A sandbox that asks for
-  either is rejected at validation, not ignored.
+  either is rejected at validation, not ignored. To get host files into a guest, use
+  [`driver_config.files`](#per-sandbox-disk-size-and-files), which copies them in.
 - `[openshell.supervisor.network].additional_ca_bundle` and the shared supervisor pool
   are rejected by the gateway for any external driver.
 - Rootfs tar uploads need the driver and gateway on the same filesystem and UID.
@@ -537,6 +630,11 @@ Limits:
 - The guest environment file sits in the sandbox's own overlay (mode `0600`, root-owned).
   It holds what the driver passes to the guest init.
 - Firecracker's `jailer` is not used.
+- With `allow_driver_config` on, anyone who can create a sandbox can read every file under
+  `OPENSHELL_VM_FILES_ROOT` by copying it into their sandbox, and can ask for a disk up to
+  `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`. Put only what all sandbox users may see in the files
+  root, and keep the maximum within the host's free space: overlays are sparse, so the host
+  disk fills only as guests write, but it can fill.
 
 ## Verification status
 

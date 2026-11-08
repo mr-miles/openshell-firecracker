@@ -133,6 +133,16 @@ struct VmSandboxDriverConfig {
     /// Accepted only so a request for bind mounts is rejected by name.
     #[serde(default)]
     mounts: Vec<serde_json::Value>,
+    /// Size of this sandbox's writable overlay disk (not in upstream).
+    #[serde(
+        default,
+        deserialize_with = "crate::sandbox_storage::deserialize_optional_mib"
+    )]
+    overlay_disk_mib: Option<u64>,
+    /// Files copied from the operator's files root into the guest (not in
+    /// upstream).
+    #[serde(default)]
+    files: Vec<crate::sandbox_storage::FileRequest>,
 }
 
 impl VmSandboxDriverConfig {
@@ -390,6 +400,11 @@ pub struct VmDriverConfig {
     /// Disabled by default.
     #[serde(default)]
     pub supervisor_identity: crate::supervisor_identity::SupervisorIdentityConfig,
+
+    /// Limits for per-sandbox overlay sizes and provisioned files (not in
+    /// upstream).
+    #[serde(default)]
+    pub sandbox_storage: crate::sandbox_storage::SandboxStorageConfig,
 }
 
 /// Redacting `Debug` so a proxy URL or credential path never reaches a log.
@@ -455,6 +470,7 @@ impl std::fmt::Debug for VmDriverConfig {
             .field("rootfs_tar_max_bytes", &self.rootfs_tar_max_bytes)
             .field("default_workdir", &self.default_workdir)
             .field("supervisor_identity", &self.supervisor_identity)
+            .field("sandbox_storage", &self.sandbox_storage)
             .finish()
     }
 }
@@ -497,6 +513,7 @@ impl Default for VmDriverConfig {
             rootfs_tar_max_bytes: None,
             default_workdir: None,
             supervisor_identity: crate::supervisor_identity::SupervisorIdentityConfig::default(),
+            sandbox_storage: crate::sandbox_storage::SandboxStorageConfig::default(),
         }
     }
 }
@@ -1146,6 +1163,10 @@ impl VmDriver {
         config.validate_runtime_security_config()?;
         config.validate_bootstrap_image_config()?;
         config.validate_rootfs_tar_config()?;
+        config
+            .sandbox_storage
+            .validate(config.overlay_disk_mib)
+            .map_err(|err| format!("invalid sandbox storage configuration: {err}"))?;
         if let Some(raw) = config.default_workdir.as_deref() {
             config.default_workdir = Some(
                 validate_default_working_dir(raw)
@@ -1626,9 +1647,19 @@ impl VmDriver {
             VmSandboxDriverConfig::from_sandbox(sandbox).map_err(Status::invalid_argument)?;
         if !driver_config.mounts.is_empty() {
             return Err(Status::failed_precondition(
-                "vm sandboxes do not support bind mounts: Firecracker has no virtiofs",
+                "vm sandboxes do not support bind mounts: Firecracker has no virtiofs; \
+                 use driver_config.files to provision files from the host",
             ));
         }
+        crate::sandbox_storage::validate_overlay_disk_mib(
+            driver_config.overlay_disk_mib,
+            &self.config.sandbox_storage,
+        )
+        .map_err(Status::invalid_argument)?;
+        // Resolve sources now, so a request naming a missing file or one
+        // outside the files root fails at create, not during provisioning.
+        crate::sandbox_storage::resolve_files(&driver_config.files, &self.config.sandbox_storage)
+            .map_err(Status::invalid_argument)?;
         let has_rootfs_tar = driver_config.rootfs_tar_path.is_some();
         if self.resolved_sandbox_image(sandbox).is_none() && !has_rootfs_tar {
             return Err(Status::failed_precondition(
@@ -1962,6 +1993,7 @@ impl VmDriver {
                     .spec
                     .as_ref()
                     .and_then(|spec| spec.workload_identity.as_ref()),
+                driver_config.overlay_disk_mib,
             )
             .await
             .map_err(|err| Status::internal(format!("prepare guest overlay disk failed: {err}")))?;
@@ -2027,6 +2059,29 @@ impl VmDriver {
             } else {
                 Status::failed_precondition(message)
             });
+        }
+
+        match self
+            .stage_provisioned_files(
+                &overlay_disk,
+                &driver_config.files,
+                overlay_preparation,
+                sandbox_owner_state,
+            )
+            .await
+        {
+            Ok(Some(dropin)) => plan.guest_init_dropins.push(dropin),
+            Ok(None) => {}
+            Err(err) => {
+                self.lifecycle_extensions
+                    .after_launch_failed(
+                        &sandbox,
+                        &state_dir,
+                        LaunchAbortReason::GuestPrepareFailed,
+                    )
+                    .await;
+                return Err(err);
+            }
         }
 
         if let Err(err) = inject_guest_init_dropins(&overlay_disk, &plan.guest_init_dropins) {
@@ -3022,12 +3077,14 @@ impl VmDriver {
         owner_source_disk: &Path,
         preparation: OverlayPreparation,
         requested_identity: Option<&WorkloadIdentityRequest>,
+        overlay_disk_mib: Option<u64>,
     ) -> Result<SandboxOwnerIdentity, Status> {
         let overlay = preparation::OverlayRequest {
             source_disk: owner_source_disk.to_path_buf(),
             preparation,
             requested_identity: requested_identity
                 .map(preparation::WorkloadIdentitySelectors::from),
+            overlay_disk_mib,
         };
         match self
             .run_preparation_in_worker(sandbox_id, "", None, false, Some(overlay))
@@ -3038,6 +3095,43 @@ impl VmDriver {
                 Err(Status::internal("overlay worker returned an image result"))
             }
         }
+    }
+
+    /// Stage the sandbox's `driver_config.files` that are due on this launch
+    /// into the overlay disk, and return the guest init drop-in that copies
+    /// them into place as the sandbox owner (not in upstream).
+    async fn stage_provisioned_files(
+        &self,
+        overlay_disk: &Path,
+        files: &[crate::sandbox_storage::FileRequest],
+        overlay_preparation: OverlayPreparation,
+        owner: SandboxOwnerIdentity,
+    ) -> Result<Option<GuestInitDropin>, Status> {
+        if files.is_empty() {
+            return Ok(None);
+        }
+        let overlay_disk = overlay_disk.to_path_buf();
+        let files = files.to_vec();
+        let config = self.config.sandbox_storage.clone();
+        let first_launch = overlay_preparation == OverlayPreparation::Fresh;
+        // Each launch stages into its own directory, so a stage left by a
+        // launch whose guest never copied it cannot collide with this one.
+        let mut generation = random_boundary_token()?;
+        generation.truncate(16);
+        tokio::task::spawn_blocking(move || {
+            crate::sandbox_storage::stage_files(
+                &overlay_disk,
+                &files,
+                &config,
+                first_launch,
+                &generation,
+                owner.uid,
+                owner.gid,
+            )
+        })
+        .await
+        .map_err(|err| Status::internal(format!("file provisioning task failed: {err}")))?
+        .map_err(|err| Status::failed_precondition(format!("provision sandbox files: {err}")))
     }
 
     /// The worker resolves the owner from the same state directory it will
@@ -3056,6 +3150,11 @@ impl VmDriver {
                 "overlay source must be a cached image",
             ));
         }
+        crate::sandbox_storage::validate_overlay_disk_mib(
+            overlay.overlay_disk_mib,
+            &self.config.sandbox_storage,
+        )
+        .map_err(Status::invalid_argument)?;
         let state_dir = sandbox_state_dir(&self.config.state_dir, sandbox_id)?;
         let overlay_disk = sandbox_runtime_disk_paths(&state_dir).overlay_disk;
         let requested_identity = overlay
@@ -3067,6 +3166,7 @@ impl VmDriver {
             &overlay.source_disk,
             overlay.preparation,
             requested_identity.as_ref(),
+            overlay.overlay_disk_mib,
         )
         .await
         .map_err(Status::internal)
@@ -3307,19 +3407,16 @@ impl VmDriver {
         owner_source_disk: &Path,
         preparation: OverlayPreparation,
         requested_identity: Option<&WorkloadIdentityRequest>,
+        requested_overlay_disk_mib: Option<u64>,
     ) -> Result<SandboxOwnerIdentity, String> {
         let span_status = openshell_otel::ErrorStatusGuard::current();
         let overlay_disk = overlay_disk.to_path_buf();
-        let overlay_size_bytes = self
-            .config
-            .overlay_disk_mib
+        // A restart re-reads the same persisted request, so a preserved
+        // overlay is checked against the size it was created with.
+        let overlay_disk_mib = requested_overlay_disk_mib.unwrap_or(self.config.overlay_disk_mib);
+        let overlay_size_bytes = overlay_disk_mib
             .checked_mul(1024 * 1024)
-            .ok_or_else(|| {
-                format!(
-                    "overlay disk size {} MiB is too large",
-                    self.config.overlay_disk_mib
-                )
-            })?;
+            .ok_or_else(|| format!("overlay disk size {overlay_disk_mib} MiB is too large"))?;
         let (owner_state, write_owner_state) = sandbox_owner_state_for_launch(
             state_dir,
             &overlay_disk,
@@ -8940,6 +9037,7 @@ mod tests {
                 Path::new("/unused"),
                 OverlayPreparation::Fresh,
                 None,
+                None,
             )
             .instrument(parent)
             .await;
@@ -9281,6 +9379,148 @@ mod tests {
         assert!(err.message().contains("bind mounts"), "{}", err.message());
     }
 
+    /// A sandbox whose `driver_config` is `json`, converted the way the
+    /// gateway forwards it (numbers become protobuf `f64`s).
+    fn sandbox_with_driver_config(json: serde_json::Value) -> Sandbox {
+        let serde_json::Value::Object(object) = json else {
+            panic!("driver_config must be an object");
+        };
+        Sandbox {
+            id: "sandbox-123".to_string(),
+            spec: Some(SandboxSpec {
+                template: Some(SandboxTemplate {
+                    image: "example/image:latest".to_string(),
+                    driver_config: Some(
+                        openshell_core::proto_struct::json_object_to_struct(object).unwrap(),
+                    ),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn driver_config_carries_overlay_size_and_files() {
+        let sandbox = sandbox_with_driver_config(serde_json::json!({
+            "overlay_disk_mib": 16384,
+            "files": [
+                {"source": "app.toml", "target": "/etc/app/app.toml", "mode": "0640"},
+                {"source": "seed", "target": "/sandbox/seed", "owner": "root", "refresh": true},
+            ],
+        }));
+        let config = VmSandboxDriverConfig::from_sandbox(&sandbox).unwrap();
+        assert_eq!(config.overlay_disk_mib, Some(16384));
+        assert_eq!(config.files.len(), 2);
+        assert_eq!(config.files[0].mode.as_deref(), Some("0640"));
+        assert_eq!(
+            config.files[1].owner,
+            crate::sandbox_storage::FileOwner::Root
+        );
+        assert!(config.files[1].refresh);
+
+        let typo = sandbox_with_driver_config(serde_json::json!({"overlay_disk_size": 1024}));
+        assert!(VmSandboxDriverConfig::from_sandbox(&typo).is_err());
+    }
+
+    #[test]
+    fn validate_sandbox_bounds_the_requested_overlay_size() {
+        let mut driver = test_driver_with_extensions(LifecycleExtensionRegistry::new());
+        driver.config.allow_driver_config = true;
+        driver.config.sandbox_storage.max_overlay_disk_mib = 8192;
+
+        let within = sandbox_with_driver_config(serde_json::json!({"overlay_disk_mib": 8192}));
+        driver
+            .validate_sandbox(&within)
+            .expect("size within the limit");
+
+        for mib in [8193_u64, crate::sandbox_storage::MIN_OVERLAY_DISK_MIB - 1] {
+            let sandbox = sandbox_with_driver_config(serde_json::json!({"overlay_disk_mib": mib}));
+            let err = driver
+                .validate_sandbox(&sandbox)
+                .expect_err("size outside the limit");
+            assert_eq!(err.code(), Code::InvalidArgument);
+            assert!(
+                err.message().contains("overlay_disk_mib"),
+                "{}",
+                err.message()
+            );
+        }
+    }
+
+    #[test]
+    fn validate_sandbox_resolves_files_inside_the_operator_root() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("app.toml"), "x = 1\n").unwrap();
+        let mut driver = test_driver_with_extensions(LifecycleExtensionRegistry::new());
+        driver.config.allow_driver_config = true;
+        let request = |source: &str| {
+            sandbox_with_driver_config(serde_json::json!({
+                "files": [{"source": source, "target": "/etc/app/app.toml"}],
+            }))
+        };
+
+        let err = driver
+            .validate_sandbox(&request("app.toml"))
+            .expect_err("files need a configured root");
+        assert!(
+            err.message().contains("OPENSHELL_VM_FILES_ROOT"),
+            "{}",
+            err.message()
+        );
+
+        driver.config.sandbox_storage.files_root = Some(root.path().to_path_buf());
+        driver
+            .validate_sandbox(&request("app.toml"))
+            .expect("a file inside the root");
+        for source in ["missing.toml", "../app.toml", "/etc/passwd"] {
+            let err = driver
+                .validate_sandbox(&request(source))
+                .expect_err("source outside the root or missing");
+            assert_eq!(err.code(), Code::InvalidArgument, "{source}");
+        }
+    }
+
+    #[tokio::test]
+    async fn requested_overlay_size_overrides_the_driver_default() {
+        let driver = test_driver_with_extensions(LifecycleExtensionRegistry::new());
+        // An oversized request must fail before any disk I/O, which shows the
+        // requested size, not the driver default, is the one used.
+        let error = driver
+            .prepare_runtime_overlay(
+                Path::new("/unused"),
+                Path::new("/unused"),
+                Path::new("/unused"),
+                OverlayPreparation::Fresh,
+                None,
+                Some(u64::MAX),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains(&u64::MAX.to_string()), "{error}");
+    }
+
+    #[tokio::test]
+    async fn overlay_worker_rejects_a_size_beyond_the_operator_limit() {
+        let mut driver = test_driver_with_extensions(LifecycleExtensionRegistry::new());
+        driver.config.sandbox_storage.max_overlay_disk_mib = 8192;
+        let request = preparation::OverlayRequest {
+            source_disk: image_cache_root_dir(&driver.config.state_dir).join("image.ext4"),
+            preparation: OverlayPreparation::Fresh,
+            requested_identity: None,
+            overlay_disk_mib: Some(8193),
+        };
+        let wire = serde_json::to_vec(&request).unwrap();
+        let decoded = serde_json::from_slice(&wire).unwrap();
+        let error = driver
+            .prepare_requested_overlay("sandbox-123", decoded)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert!(error.message().contains("8192"), "{}", error.message());
+    }
+
     #[test]
     fn validate_vm_sandbox_rejects_unknown_driver_config_fields() {
         let sandbox = Sandbox {
@@ -9448,6 +9688,7 @@ mod tests {
                 Path::new("/must-not-read-image"),
                 OverlayPreparation::PreserveExisting,
                 Some(&request),
+                None,
             )
             .await
             .unwrap_err();
@@ -9496,6 +9737,7 @@ mod tests {
                 requested_identity: Some(preparation::WorkloadIdentitySelectors::from(
                     &requested_identity,
                 )),
+                overlay_disk_mib: None,
             };
             // Exercise the serialized request and the same entry point the
             // worker uses, so dropping either selector cannot weaken the check.
@@ -10403,6 +10645,7 @@ mod tests {
                     "warm-b",
                     &plan.root_disk,
                     OverlayPreparation::Fresh,
+                    None,
                     None,
                 )
                 .await
