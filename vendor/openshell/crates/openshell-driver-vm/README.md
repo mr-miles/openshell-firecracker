@@ -26,6 +26,12 @@ Changes from upstream:
   that attested process. It serves OIDC discovery and JWKS endpoints over HTTP. The server
   stub is generated in `build.rs` without `protoc`. See `src/supervisor_identity/` and
   "Supervisor identity" in the repository README.
+- **Per-sandbox disk size and files.** `driver_config.overlay_disk_mib` sets the size of a
+  sandbox's writable overlay disk, up to `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`.
+  `driver_config.files` copies files and directories from `OPENSHELL_VM_FILES_ROOT` into the
+  guest: the driver stages them in the overlay's upper layer and a guest init drop-in copies
+  them into place with the requested owner and mode. See `src/sandbox_storage.rs` and
+  "Per-sandbox disk size and files" in the repository README.
 - **Removed.** libkrun and its embedded runtime, QEMU, GPU passthrough and `openshell-vfio`,
   virtiofs bind mounts, and the backend negotiation in the lifecycle extension API. A
   sandbox that asks for a GPU or bind mounts is rejected.
