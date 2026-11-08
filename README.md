@@ -300,6 +300,13 @@ systemctl --user restart openshell-gateway.service     # after every driver rest
 openshell gateway info                                  # shows the firecracker driver
 ```
 
+Restarting or stopping the driver service stops each running VM in order: the supervisor
+ends the workload and flushes the guest disk, then the VM exits. Sandboxes show as
+Provisioning (a `DriverStopping` event says why), and the driver relaunches them, with their
+disks, when it starts again. Sandboxes that were stopped or had failed stay that way. This
+needs the example unit's `KillMode=mixed`: with the default, systemd kills the VMs together
+with the driver.
+
 ## Build from source
 
 For another architecture, or to change the plugin or driver. Nothing here is needed to use
@@ -664,6 +671,7 @@ socket_path`) at v0.1.6 and at the vendored commit.
 | Workload starts in `/`, or lacks the image's variables | The image has no `WORKDIR`/`ENV`, or its cached disk predates this driver (it is rebuilt once). See [Image ENV and WORKDIR](#image-env-and-workdir) |
 | Gateway cannot connect to the socket | Socket under `/tmp` (hidden by `PrivateTmp`), or the driver runs as a different UID |
 | Sandbox create fails after a driver restart | Restart the gateway: the admission acknowledgement changed |
+| Sandboxes are in error (`ProcessExited`) after a driver restart | The unit lacks `KillMode=mixed`, so systemd killed the VMs before the driver could stop them. Reinstall the unit (`./install.sh --config-only`, then `systemctl --user daemon-reload`). Stop and start each affected sandbox to recover it |
 | Create fails mentioning launch authentication | The gateway has no `gateway_jwt` signing bundle |
 | Guest hangs or panics at boot | Read `rootfs-console.log`. The release kernel is built by `kernel/build.sh`, which fails if a required option is missing; a kernel you supplied needs the same options |
 | Handshake fails with a certificate not-yet-valid error | Guest clock; check `date` in the console log |

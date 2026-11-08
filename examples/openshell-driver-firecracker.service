@@ -28,6 +28,15 @@ ExecStart=/usr/local/libexec/openshell-firecracker/openshell-driver-vm \
     --bind-socket %t/openshell-firecracker/driver.sock \
     --allow-same-uid-peer
 Restart=on-failure
+# On stop or restart, systemd signals only the driver. The driver stops each VM in
+# order (the supervisor ends the workload and flushes the guest disk, then the VM
+# exits) and relaunches the same sandboxes when it starts again. The default
+# KillMode=control-group would signal the launchers and VMMs at the same moment,
+# killing the VMs mid-write and leaving the sandboxes in an error state. Whatever
+# is left once the driver exits is killed.
+KillMode=mixed
+# Each VM's stop is bounded at under 30 seconds and VMs stop in parallel.
+TimeoutStopSec=60
 # After any driver restart, restart the gateway by hand
 # (systemctl --user restart openshell-gateway.service): it reads the driver's
 # capabilities at startup, and a changed admission acknowledgement blocks calls.

@@ -98,7 +98,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -1144,6 +1144,49 @@ pub struct VmDriver {
     lifecycle_extensions: Arc<LifecycleExtensionRegistry>,
     /// The JWT-SVID issuer, while supervisor identity is enabled.
     supervisor_identity: Option<Arc<crate::supervisor_identity::SupervisorIdentity>>,
+    /// Where the driver is in its shutdown ([`VmDriver::shutdown`]).
+    shutdown: Arc<watch::Sender<ShutdownPhase>>,
+}
+
+/// The driver's progress through [`VmDriver::shutdown`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShutdownPhase {
+    Running,
+    /// Refusing new launches and stopping running VMs.
+    StoppingVms,
+    /// Every VM is stopped. Watch streams end, so the RPC server can drain.
+    Stopped,
+}
+
+/// A running or launching sandbox detached from its record for shutdown.
+struct ActiveLaunch {
+    sandbox_id: String,
+    snapshot: Sandbox,
+    state_dir: PathBuf,
+    process: Option<Arc<Mutex<VmProcess>>>,
+    provisioning_task: Option<JoinHandle<()>>,
+}
+
+fn new_shutdown_state() -> Arc<watch::Sender<ShutdownPhase>> {
+    Arc::new(watch::channel(ShutdownPhase::Running).0)
+}
+
+/// Ready condition while the driver stops a VM for its own shutdown. The
+/// sandbox has no stop or exit marker, so it is relaunched on the next start.
+///
+/// The reason is `Starting` because the gateway reports any `Ready=False`
+/// reason outside its fixed transient list (`is_terminal_failure_reason` in
+/// openshell-server) as the Error phase; `Starting` keeps the sandbox in
+/// Provisioning until the restarted driver relaunches it. The platform event
+/// published with it carries the `DriverStopping` reason.
+fn driver_shutdown_condition() -> SandboxCondition {
+    SandboxCondition {
+        r#type: "Ready".to_string(),
+        status: "False".to_string(),
+        reason: "Starting".to_string(),
+        message: "VM stopped because the VM driver is shutting down; it starts again when the driver does".to_string(),
+        transition_time: None,
+    }
 }
 
 impl VmDriver {
@@ -1247,6 +1290,7 @@ impl VmDriver {
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(lifecycle_extensions),
+            shutdown: new_shutdown_state(),
             supervisor_identity,
         };
         preparation::reconcile(&image_cache_root_dir(&driver.config.state_dir))
@@ -1673,6 +1717,7 @@ impl VmDriver {
     // gRPC API surface; boxing here would diverge from every other handler.
     #[allow(clippy::result_large_err)]
     pub async fn create_sandbox(&self, sandbox: &Sandbox) -> Result<CreateSandboxResponse, Status> {
+        self.refuse_launch_while_shutting_down()?;
         self.validate_sandbox(sandbox)?;
         decode_launch_authentication(
             sandbox
@@ -2414,6 +2459,127 @@ impl VmDriver {
         Ok(())
     }
 
+    fn shutdown_phase(&self) -> ShutdownPhase {
+        *self.shutdown.borrow()
+    }
+
+    fn refuse_launch_while_shutting_down(&self) -> Result<(), Status> {
+        if self.shutdown_phase() == ShutdownPhase::Running {
+            Ok(())
+        } else {
+            Err(Status::unavailable("vm driver is shutting down"))
+        }
+    }
+
+    /// Stop every running VM in order before the driver exits, so that a
+    /// restart of the driver service leaves sandboxes ready to run again.
+    ///
+    /// Each VM gets the same orderly stop as [`Self::stop_sandbox`] (the
+    /// supervisor ends the workload and flushes the guest, then the VM is
+    /// terminated), but no stop marker is written and the exit monitor is
+    /// detached first, so no exit marker is either. The next driver start
+    /// therefore restores and relaunches these sandboxes with their disks
+    /// kept, instead of reporting them as `ProcessExited`. Sandboxes that were
+    /// already stopped or failed keep their state.
+    ///
+    /// Launches are refused from the first call. Once every VM is down, watch
+    /// streams end so the RPC server can finish its graceful shutdown.
+    pub async fn shutdown(&self) {
+        if self.shutdown.send_replace(ShutdownPhase::StoppingVms) != ShutdownPhase::Running {
+            return;
+        }
+        let mut stopped = 0_usize;
+        // A create or start that passed its admission check just before the
+        // phase changed can still register a launch: sweep until none is left.
+        loop {
+            let active = self.take_active_launches().await;
+            if active.is_empty() {
+                break;
+            }
+            stopped += active.len();
+            futures::future::join_all(
+                active
+                    .into_iter()
+                    .map(|launch| self.stop_for_driver_shutdown(launch)),
+            )
+            .await;
+        }
+        info!(
+            sandboxes = stopped,
+            "vm driver: stopped running VMs for shutdown; they restart when the driver starts again"
+        );
+        self.shutdown.send_replace(ShutdownPhase::Stopped);
+    }
+
+    /// Detach the process handles and provisioning tasks of every sandbox
+    /// that is running or launching, and mark them as stopping.
+    async fn take_active_launches(&self) -> Vec<ActiveLaunch> {
+        let mut active = Vec::new();
+        let mut registry = self.registry.lock().await;
+        for (sandbox_id, record) in registry.iter_mut() {
+            if record.deleting || (record.process.is_none() && record.provisioning_task.is_none()) {
+                continue;
+            }
+            record.snapshot.status = Some(status_with_condition(
+                &record.snapshot,
+                driver_shutdown_condition(),
+                false,
+            ));
+            active.push(ActiveLaunch {
+                sandbox_id: sandbox_id.clone(),
+                snapshot: record.snapshot.clone(),
+                state_dir: record.state_dir.clone(),
+                process: record.process.take(),
+                provisioning_task: record.provisioning_task.take(),
+            });
+        }
+        active
+    }
+
+    async fn stop_for_driver_shutdown(&self, launch: ActiveLaunch) {
+        let ActiveLaunch {
+            sandbox_id,
+            snapshot,
+            state_dir,
+            process,
+            provisioning_task,
+        } = launch;
+        self.publish_snapshot(snapshot.clone());
+        if let Some(task) = provisioning_task {
+            task.abort();
+            // Wait for the future to drop its worker I/O and child handles.
+            let _ = task.await;
+        }
+        if let Err(status) = self.cleanup_image_preparation(&sandbox_id).await {
+            warn!(sandbox_id = %sandbox_id, error = %status.message(), "vm driver: image preparation cleanup failed during shutdown");
+        }
+        if let Some(process) = process {
+            let mut process = process.lock().await;
+            // The exit monitor sees this and leaves without writing the
+            // main-process exit marker that would fail the restore.
+            process.deleting = true;
+            if let Err(error) = terminate_sandbox_processes(&mut process).await {
+                warn!(sandbox_id = %sandbox_id, %error, "vm driver: failed to stop VM cleanly during shutdown");
+            }
+        }
+        if let Err(error) = remove_runtime_generation_material(&state_dir).await {
+            warn!(sandbox_id = %sandbox_id, %error, "vm driver: failed to remove VM authentication material during shutdown");
+        }
+        self.lifecycle_extensions
+            .after_launch_failed(&snapshot, &state_dir, LaunchAbortReason::Stopped)
+            .await;
+        self.publish_platform_event(
+            sandbox_id,
+            platform_event(
+                "vm",
+                "Normal",
+                "DriverStopping",
+                "VM stopped for a VM driver shutdown; it restarts when the driver starts again"
+                    .to_string(),
+            ),
+        );
+    }
+
     pub async fn start_sandbox(
         &self,
         sandbox_id: &str,
@@ -2421,6 +2587,7 @@ impl VmDriver {
         generation_id: &str,
         launch_authentication: Vec<u8>,
     ) -> Result<(), Status> {
+        self.refuse_launch_while_shutting_down()?;
         if !sandbox_id.is_empty() {
             validate_sandbox_id(sandbox_id)?;
         }
@@ -5057,6 +5224,7 @@ pub async fn run_image_preparation_worker(request_path: &Path) -> Result<(), Str
         preparation_root: Some(directory),
         events,
         lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+        shutdown: new_shutdown_state(),
         supervisor_identity: None,
     };
     let prepare = async {
@@ -5272,6 +5440,7 @@ impl ComputeDriver for VmDriver {
     ) -> Result<Response<Self::WatchSandboxesStream>, Status> {
         let initial = self.current_snapshots().await;
         let mut rx = self.events.subscribe();
+        let mut shutdown = self.shutdown.subscribe();
         let (tx, out_rx) = mpsc::channel(WATCH_BUFFER);
         tokio::spawn(async move {
             let mut sent = HashSet::new();
@@ -5293,9 +5462,14 @@ impl ComputeDriver for VmDriver {
             }
 
             loop {
+                // Biased so events published during shutdown (the
+                // shutdown snapshots) are sent before the stream ends.
+                // Ending it lets the RPC server's graceful shutdown finish.
                 let event = tokio::select! {
-                    () = tx.closed() => return,
+                    biased;
                     event = rx.recv() => event,
+                    () = tx.closed() => return,
+                    _ = shutdown.wait_for(|phase| *phase == ShutdownPhase::Stopped) => return,
                 };
                 match event {
                     Ok(event) => {
@@ -11022,6 +11196,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         };
 
@@ -11283,6 +11458,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         };
         let sandbox = Sandbox {
@@ -11318,6 +11494,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         };
         let sandbox = Sandbox {
@@ -11347,6 +11524,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         };
         let sandbox = Sandbox {
@@ -11377,6 +11555,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         };
 
@@ -11402,6 +11581,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         };
 
@@ -11424,6 +11604,7 @@ mod tests {
             preparation_root: None,
             events: broadcast::channel(WATCH_BUFFER).0,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         };
 
@@ -12150,6 +12331,7 @@ mod tests {
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         };
 
@@ -12217,6 +12399,7 @@ mod tests {
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         };
 
@@ -12272,6 +12455,7 @@ mod tests {
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         };
 
@@ -12900,6 +13084,228 @@ while :; do sleep 0.05; done"#,
         );
     }
 
+    fn spawn_running_child() -> Child {
+        Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    }
+
+    /// A sandbox whose VM and host supervisor are both running.
+    async fn insert_running_record(
+        driver: &VmDriver,
+        sandbox_id: &str,
+        state_dir: PathBuf,
+    ) -> Arc<Mutex<VmProcess>> {
+        let process = Arc::new(Mutex::new(VmProcess {
+            child: spawn_running_child(),
+            supervisor: spawn_running_child(),
+            supervisor_liveness: None,
+            supervisor_identity: None,
+            deleting: false,
+        }));
+        let sandbox = Sandbox {
+            id: sandbox_id.to_string(),
+            name: sandbox_id.to_string(),
+            ..Default::default()
+        };
+        driver.registry.lock().await.insert(
+            sandbox_id.to_string(),
+            SandboxRecord {
+                snapshot: sandbox_snapshot(&sandbox, provisioning_condition(), false),
+                state_dir,
+                process: Some(process.clone()),
+                provisioning_task: None,
+                preparation: None,
+                deleting: false,
+            },
+        );
+        process
+    }
+
+    fn condition_reasons(driver_record: &SandboxRecord) -> Vec<String> {
+        driver_record
+            .snapshot
+            .status
+            .as_ref()
+            .map(|status| {
+                status
+                    .conditions
+                    .iter()
+                    .map(|condition| condition.reason.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The core of the graceful shutdown: running VMs are stopped while their
+    /// exit monitor is running, yet neither the stop marker nor the
+    /// main-process exit marker is written, so the next driver start restores
+    /// them instead of reporting `ProcessExited`.
+    #[tokio::test]
+    async fn shutdown_stops_running_vms_without_marking_them_stopped_or_failed() {
+        let running_dir = tempfile::tempdir().unwrap();
+        let stopped_dir = tempfile::tempdir().unwrap();
+        let driver = test_driver_with_extensions(LifecycleExtensionRegistry::new());
+        let mut events = driver.events.subscribe();
+        let process =
+            insert_running_record(&driver, "sb-running", running_dir.path().to_path_buf()).await;
+        driver.registry.lock().await.insert(
+            "sb-stopped".to_string(),
+            SandboxRecord {
+                snapshot: sandbox_snapshot(
+                    &Sandbox {
+                        id: "sb-stopped".to_string(),
+                        ..Default::default()
+                    },
+                    stopped_condition(),
+                    false,
+                ),
+                state_dir: stopped_dir.path().to_path_buf(),
+                process: None,
+                provisioning_task: None,
+                preparation: None,
+                deleting: false,
+            },
+        );
+        let monitor = tokio::spawn({
+            let driver = driver.clone();
+            async move { driver.monitor_sandbox("sb-running".to_string()).await }
+        });
+        // Let the monitor poll the live processes at least once.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        tokio::time::timeout(Duration::from_secs(20), driver.shutdown())
+            .await
+            .expect("shutdown finishes within the stop grace");
+        tokio::time::timeout(Duration::from_secs(5), monitor)
+            .await
+            .expect("the exit monitor leaves once the VM is stopped")
+            .unwrap();
+
+        {
+            let mut process = process.lock().await;
+            assert!(process.deleting);
+            assert!(process.supervisor.try_wait().unwrap().is_some());
+            assert!(process.child.try_wait().unwrap().is_some());
+        }
+        for marker in [SANDBOX_STOPPED_FILE, MAIN_PROCESS_EXITED_FILE] {
+            assert!(
+                !running_dir.path().join(marker).exists(),
+                "{marker} would stop the sandbox from being relaunched"
+            );
+        }
+        {
+            let registry = driver.registry.lock().await;
+            let running = &registry["sb-running"];
+            assert!(running.process.is_none());
+            assert_eq!(condition_reasons(running), ["Starting"]);
+            assert!(
+                running.snapshot.status.as_ref().unwrap().conditions[0]
+                    .message
+                    .contains("shutting down")
+            );
+            // A sandbox that was already stopped keeps its state.
+            assert_eq!(
+                condition_reasons(&registry["sb-stopped"]),
+                ["ComputeStopped"]
+            );
+        }
+        let mut reasons = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event.payload {
+                Some(watch_sandboxes_event::Payload::Sandbox(sandbox)) => {
+                    let sandbox = sandbox.sandbox.unwrap();
+                    for condition in sandbox.status.unwrap().conditions {
+                        reasons.push(format!("{}:{}", sandbox.id, condition.reason));
+                    }
+                }
+                Some(watch_sandboxes_event::Payload::PlatformEvent(platform)) => {
+                    reasons.push(format!(
+                        "{}:{}",
+                        platform.sandbox_id,
+                        platform.event.unwrap().reason
+                    ));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            reasons,
+            ["sb-running:Starting", "sb-running:DriverStopping"],
+            "one transient snapshot (the gateway shows it as Provisioning, not Error), one platform event, and no ProcessExited"
+        );
+        assert_eq!(driver.shutdown_phase(), ShutdownPhase::Stopped);
+        // A second shutdown (a second signal) is a no-op.
+        driver.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_refuses_new_launches() {
+        let driver = test_driver_with_extensions(LifecycleExtensionRegistry::new());
+        driver.shutdown().await;
+
+        let create = driver
+            .create_sandbox(&Sandbox {
+                id: "sb-new".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("create is refused during shutdown");
+        assert_eq!(create.code(), Code::Unavailable);
+        let start = driver
+            .start_sandbox("sb-new", "sb-new", "", Vec::new())
+            .await
+            .expect_err("start is refused during shutdown");
+        assert_eq!(start.code(), Code::Unavailable);
+        assert!(driver.registry.lock().await.is_empty());
+    }
+
+    /// The gateway keeps its watch open, and the RPC server waits for open
+    /// streams before it exits: the stream has to end once the VMs are down,
+    /// after delivering the shutdown snapshots.
+    #[tokio::test]
+    async fn shutdown_ends_watch_streams_after_the_stopping_snapshots() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let driver = test_driver_with_extensions(LifecycleExtensionRegistry::new());
+        insert_running_record(&driver, "sb-watched", state_dir.path().to_path_buf()).await;
+        let mut stream = <VmDriver as ComputeDriver>::watch_sandboxes(
+            &driver,
+            Request::new(WatchSandboxesRequest {}),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        driver.shutdown().await;
+
+        let events = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut events = Vec::new();
+            while let Some(event) = stream.next().await {
+                events.push(event.unwrap());
+            }
+            events
+        })
+        .await
+        .expect("the watch stream ends after shutdown");
+        let last_condition = events
+            .iter()
+            .rev()
+            .filter_map(|event| match &event.payload {
+                Some(watch_sandboxes_event::Payload::Sandbox(sandbox)) => sandbox.sandbox.clone(),
+                _ => None,
+            })
+            .filter_map(|sandbox| sandbox.status)
+            .find_map(|status| status.conditions.into_iter().next())
+            .expect("snapshots before the end of the stream");
+        assert_eq!(last_condition.reason, "Starting");
+        assert!(last_condition.message.contains("shutting down"));
+    }
+
     use crate::lifecycle::{
         LaunchPlan, LifecycleError, LifecycleExtension, LifecycleExtensionRegistry, LifecycleResult,
     };
@@ -12922,6 +13328,7 @@ while :; do sleep 0.05; done"#,
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(LifecycleExtensionRegistry::new()),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         }
     }
@@ -13264,6 +13671,7 @@ while :; do sleep 0.05; done"#,
             preparation_root: None,
             events,
             lifecycle_extensions: Arc::new(extensions),
+            shutdown: new_shutdown_state(),
             supervisor_identity: None,
         }
     }

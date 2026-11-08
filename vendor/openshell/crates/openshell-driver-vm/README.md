@@ -32,6 +32,11 @@ Changes from upstream:
   guest: the driver stages them in the overlay's upper layer and a guest init drop-in copies
   them into place with the requested owner and mode. See `src/sandbox_storage.rs` and
   "Per-sandbox disk size and files" in the repository README.
+- **Graceful shutdown.** On SIGTERM or Ctrl-C, `VmDriver::shutdown` refuses new launches
+  and stops every running VM the way `StopSandbox` does, but without the stop marker and with
+  the exit monitor detached, so the next start relaunches those sandboxes. Then watch
+  streams end so the RPC server can exit. Upstream stops serving and leaves the VMs to be
+  killed with the process.
 - **Removed.** libkrun and its embedded runtime, QEMU, GPU passthrough and `openshell-vfio`,
   virtiofs bind mounts, and the backend negotiation in the lifecycle extension API. A
   sandbox that asks for a GPU or bind mounts is rejected.
