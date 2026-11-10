@@ -387,6 +387,15 @@ install_config() {
             "$LIBEXEC/openshell-firecracker-launcher" >> "$envfile"
         say "added OPENSHELL_VM_LAUNCHER_BIN to $envfile"
     fi
+    # Show newer optional settings in a kept env file too, commented out so the
+    # behavior does not change.
+    if [ -f "$envfile" ] && ! grep -q 'OPENSHELL_VM_FIRECRACKER_LOG_LEVEL' "$envfile"; then
+        printf '\n%s\n%s\n%s\n' \
+            "# Added by install.sh. Firecracker's own log level, written to each sandbox's" \
+            "# rootfs-console.log: off, error, warn (default), info, debug or trace." \
+            "# OPENSHELL_VM_FIRECRACKER_LOG_LEVEL=warn" >> "$envfile"
+        say "added a commented-out OPENSHELL_VM_FIRECRACKER_LOG_LEVEL to $envfile"
+    fi
 }
 
 [ "$DO_BINARIES" -eq 0 ] || install_binaries
