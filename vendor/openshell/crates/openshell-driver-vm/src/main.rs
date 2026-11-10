@@ -164,6 +164,11 @@ struct Args {
     #[arg(long, env = "OPENSHELL_VM_DRIVER_MEM_MIB", default_value_t = 2048)]
     mem_mib: u32,
 
+    /// Most memory a sandbox may request with `driver_config.mem_mib`. Unset, a
+    /// sandbox may not ask for more than `OPENSHELL_VM_DRIVER_MEM_MIB`.
+    #[arg(long, env = "OPENSHELL_VM_MAX_MEM_MIB")]
+    max_mem_mib: Option<u32>,
+
     #[arg(long, env = "OPENSHELL_VM_OVERLAY_DISK_MIB", default_value_t = 4096)]
     overlay_disk_mib: u64,
 
@@ -332,6 +337,7 @@ async fn main() -> Result<()> {
         log_level: args.log_level.clone(),
         vcpus: args.vcpus,
         mem_mib: args.mem_mib,
+        max_mem_mib: args.max_mem_mib,
         overlay_disk_mib: args.overlay_disk_mib,
         guest_tls_ca: args.guest_tls_ca.clone(),
         guest_tls_cert: args.guest_tls_cert.clone(),

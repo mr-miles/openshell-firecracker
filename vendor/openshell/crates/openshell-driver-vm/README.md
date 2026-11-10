@@ -26,12 +26,14 @@ Changes from upstream:
   that attested process. It serves OIDC discovery and JWKS endpoints over HTTP. The server
   stub is generated in `build.rs` without `protoc`. See `src/supervisor_identity/` and
   "Supervisor identity" in the repository README.
-- **Per-sandbox disk size and files.** `driver_config.overlay_disk_mib` sets the size of a
+- **Per-sandbox memory, disk size and files.** `driver_config.mem_mib` sets a sandbox's
+  memory, from 256 MiB up to `OPENSHELL_VM_MAX_MEM_MIB` (default: `OPENSHELL_VM_DRIVER_MEM_MIB`,
+  which stays the default size). `driver_config.overlay_disk_mib` sets the size of a
   sandbox's writable overlay disk, up to `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`.
   `driver_config.files` copies files and directories from `OPENSHELL_VM_FILES_ROOT` into the
   guest: the driver stages them in the overlay's upper layer and a guest init drop-in copies
   them into place with the requested owner and mode. See `src/sandbox_storage.rs` and
-  "Per-sandbox disk size and files" in the repository README.
+  "Per-sandbox memory, disk size and files" in the repository README.
 - **Image cache cleanup.** Upstream never deletes a prepared disk. When the driver starts
   and after each sandbox start, stop or delete, it removes cache entries no sandbox
   references: those from other driver builds at once, and its own build's once unused for

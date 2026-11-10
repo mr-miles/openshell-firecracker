@@ -404,6 +404,13 @@ install_config() {
             "# OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT=50" >> "$envfile"
         say "added a commented-out OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT to $envfile"
     fi
+    if [ -f "$envfile" ] && ! grep -q 'OPENSHELL_VM_MAX_MEM_MIB' "$envfile"; then
+        printf '\n%s\n%s\n%s\n' \
+            "# Added by install.sh. Largest driver_config.mem_mib a sandbox may ask for." \
+            "# Unset: no more than the default memory, OPENSHELL_VM_DRIVER_MEM_MIB (2048)." \
+            "# OPENSHELL_VM_MAX_MEM_MIB=8192" >> "$envfile"
+        say "added a commented-out OPENSHELL_VM_MAX_MEM_MIB to $envfile"
+    fi
 }
 
 [ "$DO_BINARIES" -eq 0 ] || install_binaries

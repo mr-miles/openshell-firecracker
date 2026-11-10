@@ -111,6 +111,9 @@ const DRIVER_NAME: &str = "openshell-driver-vm";
 const WATCH_BUFFER: usize = 256;
 const DEFAULT_VCPUS: u8 = 2;
 const DEFAULT_MEM_MIB: u32 = 2048;
+/// Smallest memory a sandbox may request with `driver_config.mem_mib` (not in
+/// upstream).
+pub const MIN_MEM_MIB: u32 = 256;
 const DEFAULT_OVERLAY_DISK_MIB: u64 = 4096;
 const DEFAULT_REGISTRY_LAYER_DOWNLOAD_CONCURRENCY: usize = 4;
 const MAX_REGISTRY_LAYER_DOWNLOAD_CONCURRENCY: usize = 16;
@@ -140,6 +143,12 @@ struct VmSandboxDriverConfig {
         deserialize_with = "crate::sandbox_storage::deserialize_optional_mib"
     )]
     overlay_disk_mib: Option<u64>,
+    /// Memory of this sandbox's VM, in MiB (not in upstream).
+    #[serde(
+        default,
+        deserialize_with = "crate::sandbox_storage::deserialize_optional_mem_mib"
+    )]
+    mem_mib: Option<u64>,
     /// Files copied from the operator's files root into the guest (not in
     /// upstream).
     #[serde(default)]
@@ -343,6 +352,10 @@ pub struct VmDriverConfig {
     pub log_level: String,
     pub vcpus: u8,
     pub mem_mib: u32,
+    /// Most memory a sandbox may request with `driver_config.mem_mib` (not in
+    /// upstream). Unset, a sandbox may not ask for more than `mem_mib`.
+    #[serde(default)]
+    pub max_mem_mib: Option<u32>,
     pub overlay_disk_mib: u64,
     pub guest_tls_ca: Option<PathBuf>,
     pub guest_tls_cert: Option<PathBuf>,
@@ -432,6 +445,7 @@ impl std::fmt::Debug for VmDriverConfig {
             .field("log_level", &self.log_level)
             .field("vcpus", &self.vcpus)
             .field("mem_mib", &self.mem_mib)
+            .field("max_mem_mib", &self.max_mem_mib)
             .field("overlay_disk_mib", &self.overlay_disk_mib)
             .field("guest_tls_ca", &self.guest_tls_ca)
             .field("guest_tls_cert", &self.guest_tls_cert)
@@ -511,6 +525,7 @@ impl Default for VmDriverConfig {
             log_level: "info".to_string(),
             vcpus: DEFAULT_VCPUS,
             mem_mib: DEFAULT_MEM_MIB,
+            max_mem_mib: None,
             overlay_disk_mib: DEFAULT_OVERLAY_DISK_MIB,
             guest_tls_ca: None,
             guest_tls_cert: None,
@@ -565,6 +580,40 @@ impl VmDriverConfig {
             return Err("provider_spiffe_allow_guest_tcp is set but no provider_spiffe_workload_api_tcp_endpoint is configured".to_string());
         }
         Ok(())
+    }
+
+    /// Most memory a sandbox may request: `max_mem_mib`, or `mem_mib` when
+    /// unset.
+    pub fn effective_max_mem_mib(&self) -> u32 {
+        self.max_mem_mib.unwrap_or(self.mem_mib)
+    }
+
+    pub fn validate_memory_config(&self) -> Result<(), String> {
+        if let Some(max) = self.max_mem_mib
+            && max < self.mem_mib
+        {
+            return Err(format!(
+                "max_mem_mib {max} MiB is smaller than the default mem_mib {} MiB",
+                self.mem_mib
+            ));
+        }
+        Ok(())
+    }
+
+    /// The memory, in MiB, of a sandbox whose `driver_config` asked for
+    /// `requested`: the default without a request, otherwise the request if it
+    /// is within [`MIN_MEM_MIB`] and [`Self::effective_max_mem_mib`].
+    pub(crate) fn sandbox_mem_mib(&self, requested: Option<u64>) -> Result<u32, String> {
+        let Some(mib) = requested else {
+            return Ok(self.mem_mib);
+        };
+        let max = self.effective_max_mem_mib();
+        u32::try_from(mib)
+            .ok()
+            .filter(|mib| (MIN_MEM_MIB..=max).contains(mib))
+            .ok_or_else(|| {
+                format!("mem_mib {mib} is outside the allowed range {MIN_MEM_MIB} to {max} MiB")
+            })
     }
 
     pub fn validate_bootstrap_image_config(&self) -> Result<(), String> {
@@ -1230,6 +1279,9 @@ impl VmDriver {
             .sandbox_storage
             .validate(config.overlay_disk_mib)
             .map_err(|err| format!("invalid sandbox storage configuration: {err}"))?;
+        config
+            .validate_memory_config()
+            .map_err(|err| format!("invalid VM memory configuration: {err}"))?;
         if let Some(raw) = config.default_workdir.as_deref() {
             config.default_workdir = Some(
                 validate_default_working_dir(raw)
@@ -1724,6 +1776,9 @@ impl VmDriver {
             &self.config.sandbox_storage,
         )
         .map_err(Status::invalid_argument)?;
+        self.config
+            .sandbox_mem_mib(driver_config.mem_mib)
+            .map_err(Status::invalid_argument)?;
         // Resolve sources now, so a request naming a missing file or one
         // outside the files root fails at create, not during provisioning.
         crate::sandbox_storage::resolve_files(&driver_config.files, &self.config.sandbox_storage)
@@ -1954,6 +2009,12 @@ impl VmDriver {
         )?;
         let driver_config =
             VmSandboxDriverConfig::from_sandbox(&sandbox).map_err(Status::invalid_argument)?;
+        // Checked again at every launch: the operator may have lowered the
+        // limit since the sandbox was created.
+        let mem_mib = self
+            .config
+            .sandbox_mem_mib(driver_config.mem_mib)
+            .map_err(Status::failed_precondition)?;
         let driver_config_had_rootfs_tar = driver_config.rootfs_tar_path.is_some();
         let rootfs_tar_path = match driver_config.rootfs_tar_path {
             Some(raw) if overlay_preparation == OverlayPreparation::Fresh => {
@@ -2088,7 +2149,7 @@ impl VmDriver {
 
         let mut plan = LaunchPlan {
             vcpus: self.config.vcpus,
-            mem_mib: self.config.mem_mib,
+            mem_mib,
             kernel_profile: None,
             guest_init_dropins: Vec::new(),
             env: Vec::new(),
@@ -9773,6 +9834,72 @@ mod tests {
                 err.message()
             );
         }
+    }
+
+    #[test]
+    fn driver_config_carries_the_requested_memory() {
+        let sandbox = sandbox_with_driver_config(serde_json::json!({"mem_mib": 4096}));
+        let config = VmSandboxDriverConfig::from_sandbox(&sandbox).unwrap();
+        assert_eq!(config.mem_mib, Some(4096));
+
+        let none = sandbox_with_driver_config(serde_json::json!({}));
+        assert_eq!(VmSandboxDriverConfig::from_sandbox(&none).unwrap().mem_mib, None);
+
+        for bad in [serde_json::json!(1.5), serde_json::json!(-1), serde_json::json!("4096")] {
+            let sandbox = sandbox_with_driver_config(serde_json::json!({"mem_mib": bad}));
+            let err = VmSandboxDriverConfig::from_sandbox(&sandbox).unwrap_err();
+            assert!(err.contains("mem_mib"), "{err}");
+        }
+    }
+
+    #[test]
+    fn sandbox_memory_defaults_and_is_capped_by_max_mem_mib() {
+        let mut config = VmDriverConfig {
+            mem_mib: 2048,
+            ..Default::default()
+        };
+        assert_eq!(config.sandbox_mem_mib(None), Ok(2048), "the default");
+        assert_eq!(config.sandbox_mem_mib(Some(1024)), Ok(1024), "less is allowed");
+        assert_eq!(config.sandbox_mem_mib(Some(u64::from(MIN_MEM_MIB))), Ok(MIN_MEM_MIB));
+        // Without max_mem_mib, a sandbox cannot ask for more than the default.
+        let err = config.sandbox_mem_mib(Some(2049)).unwrap_err();
+        assert!(err.contains("256 to 2048"), "{err}");
+
+        config.max_mem_mib = Some(8192);
+        assert_eq!(config.sandbox_mem_mib(Some(8192)), Ok(8192));
+        assert_eq!(config.sandbox_mem_mib(None), Ok(2048), "still the default");
+        for mib in [8193, u64::from(MIN_MEM_MIB) - 1, 0, u64::from(u32::MAX) + 1] {
+            assert!(config.sandbox_mem_mib(Some(mib)).is_err(), "{mib}");
+        }
+    }
+
+    #[test]
+    fn max_mem_mib_may_not_be_below_the_default() {
+        let mut config = VmDriverConfig {
+            mem_mib: 2048,
+            ..Default::default()
+        };
+        config.validate_memory_config().expect("unset");
+        config.max_mem_mib = Some(2048);
+        config.validate_memory_config().expect("equal");
+        config.max_mem_mib = Some(2047);
+        let err = config.validate_memory_config().unwrap_err();
+        assert!(err.contains("max_mem_mib 2047"), "{err}");
+    }
+
+    #[test]
+    fn validate_sandbox_bounds_the_requested_memory() {
+        let mut driver = test_driver_with_extensions(LifecycleExtensionRegistry::new());
+        driver.config.allow_driver_config = true;
+        driver.config.max_mem_mib = Some(8192);
+
+        let within = sandbox_with_driver_config(serde_json::json!({"mem_mib": 8192}));
+        driver.validate_sandbox(&within).expect("memory within the limit");
+
+        let over = sandbox_with_driver_config(serde_json::json!({"mem_mib": 8193}));
+        let err = driver.validate_sandbox(&over).expect_err("memory over the limit");
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert!(err.message().contains("mem_mib"), "{}", err.message());
     }
 
     #[test]
