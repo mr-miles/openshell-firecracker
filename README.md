@@ -411,6 +411,7 @@ driver inherits:
 | `OPENSHELL_VM_FIRECRACKER_SUBUIDS` | `auto` (default), `required`, or `off`; see [Per-VM uid](#per-vm-uid) |
 | `OPENSHELL_VM_FIRECRACKER_LEASE_DIR` | Sub-uid lease directory. Defaults to `$XDG_RUNTIME_DIR/openshell-firecracker-leases` |
 | `OPENSHELL_VM_FIRECRACKER_LOG_LEVEL` | Firecracker's own log level: `off`, `error`, `warn` (default), `info`, `debug` or `trace`. Firecracker's messages go to `rootfs-console.log` |
+| `OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT` | Size of each guest's compressed swap (zram) as a percentage of its memory, `0` to `200`. Default `50`; `0` turns it off. See [Guest swap](#guest-swap) |
 | `OPENSHELL_FIRECRACKER_DRIVER` | Path of the driver, if it cannot be found from the launcher's parent |
 
 The driver's `OPENSHELL_VM_DEFAULT_WORKDIR` (default `/sandbox`) sets the working directory for
@@ -431,6 +432,22 @@ The driver itself needs `OPENSHELL_GRPC_ENDPOINT` (required), `OPENSHELL_VM_TLS_
 both sides). The gateway passes its proxy settings and gateway name to a driver it
 spawns; an externally run driver must set the `OPENSHELL_VM_UPSTREAM_PROXY*` and
 `OPENSHELL_GATEWAY_NAME` equivalents itself.
+
+### Guest swap
+
+A guest has no swap disk. Near its memory limit it can only drop file pages, including
+the programs it is running, and it stalls for seconds at a time reading them back. A
+long stall can cut the guest's connection to the supervisor and end the sandbox. So each
+guest gets compressed swap in its own memory (zram), half its memory by default
+(`OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT`). Nothing is written to the host's disk.
+
+zram stretches memory; it does not add any. To give every VM more, set the driver's
+`OPENSHELL_VM_DRIVER_MEM_MIB` (default `2048`). A sandbox's `driver_config` cannot
+change its memory.
+
+It needs the guest kernel from this release or later, and `mkswap` and `swapon` in the
+bootstrap image. Without either, the guest boots without swap. `rootfs-console.log`
+says which happened: `openshell-firecracker: zram swap on (1024 MiB)`, or why it is off.
 
 ## Per-sandbox disk size and files
 

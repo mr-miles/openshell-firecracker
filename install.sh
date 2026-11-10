@@ -396,6 +396,14 @@ install_config() {
             "# OPENSHELL_VM_FIRECRACKER_LOG_LEVEL=warn" >> "$envfile"
         say "added a commented-out OPENSHELL_VM_FIRECRACKER_LOG_LEVEL to $envfile"
     fi
+    if [ -f "$envfile" ] && ! grep -q 'OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT' "$envfile"; then
+        printf '\n%s\n%s\n%s\n%s\n' \
+            "# Added by install.sh. Compressed swap (zram) in each guest, as a percentage of" \
+            "# its memory: 0 to 200, 0 for none. Raise OPENSHELL_VM_DRIVER_MEM_MIB (default" \
+            "# 2048) to give VMs more memory." \
+            "# OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT=50" >> "$envfile"
+        say "added a commented-out OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT to $envfile"
+    fi
 }
 
 [ "$DO_BINARIES" -eq 0 ] || install_binaries
