@@ -91,7 +91,7 @@ pub enum VmmLogLevel {
 
 impl VmmLogLevel {
     /// The value Firecracker's `--level` takes.
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Off => "Off",
             Self::Error => "Error",
