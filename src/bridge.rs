@@ -119,15 +119,30 @@ fn relay(id: u64, guest: UnixStream, bridge: &Bridge) {
             return;
         }
     };
-    log(format_args!("vsock relay {id}: opened to {}", bridge.target.display()));
+    log(format_args!(
+        "vsock relay {id}: opened to {}",
+        bridge.target.display()
+    ));
     let upstream = std::thread::spawn(move || {
         let (bytes, end) = pump(&mut guest_reader, &mut host_writer);
-        log_end(id, Direction::GuestToSupervisor, opened.elapsed(), bytes, &end);
+        log_end(
+            id,
+            Direction::GuestToSupervisor,
+            opened.elapsed(),
+            bytes,
+            &end,
+        );
         let _ = host_writer.shutdown(Shutdown::Write);
     });
     let (mut host_reader, mut guest_writer) = (host, guest);
     let (bytes, end) = pump(&mut host_reader, &mut guest_writer);
-    log_end(id, Direction::SupervisorToGuest, opened.elapsed(), bytes, &end);
+    log_end(
+        id,
+        Direction::SupervisorToGuest,
+        opened.elapsed(),
+        bytes,
+        &end,
+    );
     let _ = guest_writer.shutdown(Shutdown::Write);
     let _ = upstream.join();
 }
@@ -343,7 +358,10 @@ mod tests {
 
     #[test]
     fn a_failure_names_the_side_that_failed() {
-        let (bytes, end) = pump(&mut Failing(io::ErrorKind::ConnectionReset), &mut Vec::new());
+        let (bytes, end) = pump(
+            &mut Failing(io::ErrorKind::ConnectionReset),
+            &mut Vec::new(),
+        );
         assert_eq!(bytes, 0);
         assert!(
             matches!(&end, End::Read(error) if error.kind() == io::ErrorKind::ConnectionReset),
@@ -394,6 +412,10 @@ mod tests {
         assert_eq!(at(1_798_761_599_999), "2026-12-31T23:59:59.999Z");
         assert_eq!(at(1_803_859_200_000), "2027-03-01T00:00:00.000Z");
         assert_eq!(at(4_107_542_399_000), "2100-02-28T23:59:59.000Z");
-        assert_eq!(at(4_107_542_400_000), "2100-03-01T00:00:00.000Z", "2100 is not leap");
+        assert_eq!(
+            at(4_107_542_400_000),
+            "2100-03-01T00:00:00.000Z",
+            "2100 is not leap"
+        );
     }
 }

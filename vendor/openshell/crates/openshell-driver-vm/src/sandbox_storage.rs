@@ -158,9 +158,7 @@ where
 
 /// Accept `mem_mib` as a whole number of MiB (not in upstream). The VM driver
 /// checks it against its memory limits.
-pub(crate) fn deserialize_optional_mem_mib<'de, D>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error>
+pub(crate) fn deserialize_optional_mem_mib<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

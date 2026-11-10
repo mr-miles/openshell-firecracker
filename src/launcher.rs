@@ -303,7 +303,11 @@ pub fn run(args: &LauncherArgs) -> Result<(), String> {
 
     // Firecracker has no exec/env injection: the guest init
     // sources its environment from the overlay, as with the QEMU backend.
-    let env = envfile::render(&args.vm_env, host_epoch_secs(), host.zram_mib(args.vm_mem_mib))?;
+    let env = envfile::render(
+        &args.vm_env,
+        host_epoch_secs(),
+        host.zram_mib(args.vm_mem_mib),
+    )?;
     envfile::write_into_overlay(overlay, &env)?;
 
     // Guest-initiated vsock connections reach `<uds>_<port>`, where this
@@ -455,7 +459,10 @@ mod tests {
         unsafe {
             std::env::set_var(ENV_LOG_LEVEL, "info");
         }
-        assert_eq!(HostConfig::from_env().unwrap().vmm_log_level, VmmLogLevel::Info);
+        assert_eq!(
+            HostConfig::from_env().unwrap().vmm_log_level,
+            VmmLogLevel::Info
+        );
         unsafe {
             std::env::set_var(ENV_LOG_LEVEL, "chatty");
         }
@@ -468,7 +475,11 @@ mod tests {
             unsafe {
                 std::env::set_var(ENV_ZRAM_PERCENT, value);
             }
-            assert_eq!(HostConfig::from_env().unwrap().zram_percent, percent, "{value:?}");
+            assert_eq!(
+                HostConfig::from_env().unwrap().zram_percent,
+                percent,
+                "{value:?}"
+            );
         }
         assert_eq!(HostConfig::from_env().unwrap().zram_mib(4096), 2048);
         unsafe {

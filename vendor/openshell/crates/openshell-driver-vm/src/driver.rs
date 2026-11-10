@@ -9843,9 +9843,16 @@ mod tests {
         assert_eq!(config.mem_mib, Some(4096));
 
         let none = sandbox_with_driver_config(serde_json::json!({}));
-        assert_eq!(VmSandboxDriverConfig::from_sandbox(&none).unwrap().mem_mib, None);
+        assert_eq!(
+            VmSandboxDriverConfig::from_sandbox(&none).unwrap().mem_mib,
+            None
+        );
 
-        for bad in [serde_json::json!(1.5), serde_json::json!(-1), serde_json::json!("4096")] {
+        for bad in [
+            serde_json::json!(1.5),
+            serde_json::json!(-1),
+            serde_json::json!("4096"),
+        ] {
             let sandbox = sandbox_with_driver_config(serde_json::json!({"mem_mib": bad}));
             let err = VmSandboxDriverConfig::from_sandbox(&sandbox).unwrap_err();
             assert!(err.contains("mem_mib"), "{err}");
@@ -9859,8 +9866,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.sandbox_mem_mib(None), Ok(2048), "the default");
-        assert_eq!(config.sandbox_mem_mib(Some(1024)), Ok(1024), "less is allowed");
-        assert_eq!(config.sandbox_mem_mib(Some(u64::from(MIN_MEM_MIB))), Ok(MIN_MEM_MIB));
+        assert_eq!(
+            config.sandbox_mem_mib(Some(1024)),
+            Ok(1024),
+            "less is allowed"
+        );
+        assert_eq!(
+            config.sandbox_mem_mib(Some(u64::from(MIN_MEM_MIB))),
+            Ok(MIN_MEM_MIB)
+        );
         // Without max_mem_mib, a sandbox cannot ask for more than the default.
         let err = config.sandbox_mem_mib(Some(2049)).unwrap_err();
         assert!(err.contains("256 to 2048"), "{err}");
@@ -9894,10 +9908,14 @@ mod tests {
         driver.config.max_mem_mib = Some(8192);
 
         let within = sandbox_with_driver_config(serde_json::json!({"mem_mib": 8192}));
-        driver.validate_sandbox(&within).expect("memory within the limit");
+        driver
+            .validate_sandbox(&within)
+            .expect("memory within the limit");
 
         let over = sandbox_with_driver_config(serde_json::json!({"mem_mib": 8193}));
-        let err = driver.validate_sandbox(&over).expect_err("memory over the limit");
+        let err = driver
+            .validate_sandbox(&over)
+            .expect_err("memory over the limit");
         assert_eq!(err.code(), Code::InvalidArgument);
         assert!(err.message().contains("mem_mib"), "{}", err.message());
     }
