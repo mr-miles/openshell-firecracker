@@ -12,8 +12,8 @@ driver: libkrun, QEMU, GPU passthrough and virtiofs bind mounts are not part of 
 
 It also differs from OpenShell's driver in three behaviors: a sandbox starts the way a
 container does, with the image's `ENV` and in the image's `WORKDIR`
-([Image ENV and WORKDIR](#image-env-and-workdir)); a sandbox can set its disk size and have
-files copied in from the host ([Per-sandbox disk size and files](#per-sandbox-disk-size-and-files));
+([Image ENV and WORKDIR](#image-env-and-workdir)); a sandbox can set its memory and disk size
+and have files copied in from the host ([Per-sandbox memory, disk size and files](#per-sandbox-memory-disk-size-and-files));
 and, if enabled, the driver issues SPIFFE JWT-SVIDs to its host supervisors itself, without
 a SPIRE agent ([Supervisor identity](#supervisor-identity)).
 
@@ -410,15 +410,17 @@ driver inherits:
 | `OPENSHELL_VM_FIRECRACKER_KERNEL` | Optional. Absolute path to the guest `vmlinux`. Default: `vmlinux` beside the launcher, or in `/usr/local/libexec/openshell-firecracker`, `/var/lib/openshell-firecracker` |
 | `OPENSHELL_VM_FIRECRACKER_SUBUIDS` | `auto` (default), `required`, or `off`; see [Per-VM uid](#per-vm-uid) |
 | `OPENSHELL_VM_FIRECRACKER_LEASE_DIR` | Sub-uid lease directory. Defaults to `$XDG_RUNTIME_DIR/openshell-firecracker-leases` |
+| `OPENSHELL_VM_FIRECRACKER_LOG_LEVEL` | Firecracker's own log level: `off`, `error`, `warn` (default), `info`, `debug` or `trace`. Firecracker's messages go to `rootfs-console.log` |
+| `OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT` | Size of each guest's compressed swap (zram) as a percentage of its memory, `0` to `200`. Default `50`; `0` turns it off. See [Guest swap](#guest-swap) |
 | `OPENSHELL_FIRECRACKER_DRIVER` | Path of the driver, if it cannot be found from the launcher's parent |
 
 The driver's `OPENSHELL_VM_DEFAULT_WORKDIR` (default `/sandbox`) sets the working directory for
 sandboxes whose image has none ([Image ENV and WORKDIR](#image-env-and-workdir)).
 The driver's `OPENSHELL_VM_SUPERVISOR_IDENTITY*` options (optional, off by default) are in
 [Supervisor identity](#supervisor-identity).
-The driver's `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`, `OPENSHELL_VM_FILES_ROOT` and
-`OPENSHELL_VM_FILES_MAX_BYTES` limit what a sandbox can request in its `driver_config`; see
-[Per-sandbox disk size and files](#per-sandbox-disk-size-and-files).
+The driver's `OPENSHELL_VM_MAX_MEM_MIB`, `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`,
+`OPENSHELL_VM_FILES_ROOT` and `OPENSHELL_VM_FILES_MAX_BYTES` limit what a sandbox can request in its `driver_config`; see
+[Per-sandbox memory, disk size and files](#per-sandbox-memory-disk-size-and-files).
 The driver's `OPENSHELL_VM_IMAGE_CACHE_MAX_IDLE_HOURS` (default 48, 0 to keep everything)
 sets when unused image disks are removed; see [Image cache cleanup](#image-cache-cleanup).
 
@@ -431,10 +433,26 @@ both sides). The gateway passes its proxy settings and gateway name to a driver 
 spawns; an externally run driver must set the `OPENSHELL_VM_UPSTREAM_PROXY*` and
 `OPENSHELL_GATEWAY_NAME` equivalents itself.
 
-## Per-sandbox disk size and files
+### Guest swap
 
-A sandbox can set the size of its writable disk and have files copied in from the host,
-through its `driver_config`. Neither is in upstream OpenShell.
+A guest has no swap disk. Near its memory limit it can only drop file pages, including
+the programs it is running, and it stalls for seconds at a time reading them back. A
+long stall can cut the guest's connection to the supervisor and end the sandbox. So each
+guest gets compressed swap in its own memory (zram), half its memory by default
+(`OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT`). Nothing is written to the host's disk.
+
+zram stretches memory; it does not add any. To give VMs more, raise the driver's default,
+`OPENSHELL_VM_DRIVER_MEM_MIB` (`2048`), or let a sandbox ask for more with
+`driver_config.mem_mib` ([Per-sandbox memory, disk size and files](#per-sandbox-memory-disk-size-and-files)).
+
+It needs the guest kernel from this release or later, and `mkswap` and `swapon` in the
+bootstrap image. Without either, the guest boots without swap. `rootfs-console.log`
+says which happened: `openshell-firecracker: zram swap on (1024 MiB)`, or why it is off.
+
+## Per-sandbox memory, disk size and files
+
+A sandbox can set its memory and the size of its writable disk, and have files copied in
+from the host, through its `driver_config`. None of these is in upstream OpenShell.
 
 ### Enable driver_config
 
@@ -473,6 +491,7 @@ drops the rest:
 
 ```shell
 openshell sandbox create --driver-config-json '{"firecracker": {
+  "mem_mib": 4096,
   "overlay_disk_mib": 16384,
   "files": [
     {"source": "app/app.toml", "target": "/etc/app/app.toml", "mode": "0640"},
@@ -480,6 +499,12 @@ openshell sandbox create --driver-config-json '{"firecracker": {
     {"source": "certs/ca.pem", "target": "/etc/ssl/app-ca.pem", "owner": "root", "refresh": true}
   ]}}' ...
 ```
+
+**`mem_mib`** is the VM's memory. The default is `OPENSHELL_VM_DRIVER_MEM_MIB` (2048). A
+request must be between 256 and `OPENSHELL_VM_MAX_MEM_MIB`, which defaults to the default
+memory: set it to let sandboxes ask for more. Unlike the disk, the memory is real host RAM
+once the guest touches it. Stop and start keep the request; a start fails if it is outside
+the limits in force, for instance after the maximum was lowered.
 
 **`overlay_disk_mib`** is the size of the sandbox's writable overlay disk, which holds
 everything the workload writes. The default is `OPENSHELL_VM_OVERLAY_DISK_MIB` (4096). A
@@ -639,7 +664,7 @@ Limits:
 
 - No virtiofs bind mounts and no GPU passthrough on Firecracker. A sandbox that asks for
   either is rejected at validation, not ignored. To get host files into a guest, use
-  [`driver_config.files`](#per-sandbox-disk-size-and-files), which copies them in.
+  [`driver_config.files`](#per-sandbox-memory-disk-size-and-files), which copies them in.
 - `[openshell.supervisor.network].additional_ca_bundle` and the shared supervisor pool
   are rejected by the gateway for any external driver.
 - Rootfs tar uploads need the driver and gateway on the same filesystem and UID.
@@ -662,8 +687,8 @@ Limits:
   It holds what the driver passes to the guest init.
 - Firecracker's `jailer` is not used.
 - With `allow_driver_config` on, anyone who can create a sandbox can read every file under
-  `OPENSHELL_VM_FILES_ROOT` by copying it into their sandbox, and can ask for a disk up to
-  `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`. Put only what all sandbox users may see in the files
+  `OPENSHELL_VM_FILES_ROOT` by copying it into their sandbox, can ask for memory up to
+  `OPENSHELL_VM_MAX_MEM_MIB` and a disk up to `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`. Put only what all sandbox users may see in the files
   root, and keep the maximum within the host's free space: overlays are sparse, so the host
   disk fills only as guests write, but it can fill.
 
@@ -700,6 +725,7 @@ socket_path`) at v0.1.6 and at the vendored commit.
 | Create fails mentioning launch authentication | The gateway has no `gateway_jwt` signing bundle |
 | Guest hangs or panics at boot | Read `rootfs-console.log`. The release kernel is built by `kernel/build.sh`, which fails if a required option is missing; a kernel you supplied needs the same options |
 | Handshake fails with a certificate not-yet-valid error | Guest clock; check `date` in the console log |
+| Sandbox dies with `boundary terminated: boundary lost during wait`, or the guest logs `Sandbox Protocol connection lost` | The supervisor connection over vsock was cut. The launcher logs every relay of that connection to the driver's stderr (`journalctl --user -u openshell-driver-firecracker`), with host timestamps: `vsock relay N: opened`, then one line per direction saying when it ended and why. The direction that ended first, and whether it was a clean close or an error, shows which side dropped it. Set `OPENSHELL_VM_FIRECRACKER_LOG_LEVEL=info` for more of Firecracker's own messages in `rootfs-console.log` |
 | Launcher says the guest environment file was not written | `debugfs` missing or the overlay path has spaces or quotes |
 
 ## Development

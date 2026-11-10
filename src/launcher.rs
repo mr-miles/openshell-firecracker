@@ -21,7 +21,7 @@ use std::process::{Command, Stdio};
 use crate::bridge;
 use crate::cli::LauncherArgs;
 use crate::config::{VSOCK_UDS_NAME, VmmConfig, bridge_socket_name};
-use crate::confine::{Access, Bind, JailSpec};
+use crate::confine::{Access, Bind, JailSpec, VmmLogLevel};
 use crate::console::pump;
 use crate::envfile;
 use crate::locate;
@@ -39,6 +39,19 @@ pub const ENV_KERNEL: &str = "OPENSHELL_VM_FIRECRACKER_KERNEL";
 pub const ENV_SUBUIDS: &str = "OPENSHELL_VM_FIRECRACKER_SUBUIDS";
 /// Directory of sub-uid lease files shared by all launchers of one driver.
 pub const ENV_LEASE_DIR: &str = "OPENSHELL_VM_FIRECRACKER_LEASE_DIR";
+/// Firecracker's own log level: `off`, `error`, `warn` (default), `info`,
+/// `debug` or `trace`.
+pub const ENV_LOG_LEVEL: &str = "OPENSHELL_VM_FIRECRACKER_LOG_LEVEL";
+/// Size of each guest's zram swap, as a percentage of its memory (0 to 200;
+/// 0 turns it off).
+pub const ENV_ZRAM_PERCENT: &str = "OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT";
+
+/// zram swap is half the guest's memory unless [`ENV_ZRAM_PERCENT`] says
+/// otherwise. At a typical 2-3x compression, that holds the guest's coldest
+/// pages in about a fifth of its memory.
+const DEFAULT_ZRAM_PERCENT: u32 = 50;
+/// Beyond twice the guest's memory, the compressed pages alone could fill it.
+const MAX_ZRAM_PERCENT: u32 = 200;
 
 const VMM_CONFIG_FILE: &str = "firecracker.json";
 
@@ -49,13 +62,38 @@ pub struct HostConfig {
     pub kernel: PathBuf,
     pub subuids: SubuidMode,
     pub lease_dir: PathBuf,
+    pub vmm_log_level: VmmLogLevel,
+    /// zram swap size as a percentage of guest memory; 0 is off.
+    pub zram_percent: u32,
 }
 
 impl HostConfig {
+    /// The zram swap size, in MiB, for a guest with `mem_mib` of memory.
+    pub fn zram_mib(&self, mem_mib: u32) -> u64 {
+        u64::from(mem_mib) * u64::from(self.zram_percent) / 100
+    }
+
     pub fn from_env() -> Result<Self, String> {
         let subuids = match std::env::var(ENV_SUBUIDS) {
             Ok(value) => value.parse()?,
             Err(_) => SubuidMode::default(),
+        };
+        let vmm_log_level = match std::env::var(ENV_LOG_LEVEL) {
+            Ok(value) if !value.is_empty() => value.parse()?,
+            _ => VmmLogLevel::default(),
+        };
+        let zram_percent = match std::env::var(ENV_ZRAM_PERCENT) {
+            Ok(value) if !value.is_empty() => value
+                .parse::<u32>()
+                .ok()
+                .filter(|percent| *percent <= MAX_ZRAM_PERCENT)
+                .ok_or_else(|| {
+                    format!(
+                        "{ENV_ZRAM_PERCENT} must be a whole number from 0 to \
+                         {MAX_ZRAM_PERCENT}, not '{value}'"
+                    )
+                })?,
+            _ => DEFAULT_ZRAM_PERCENT,
         };
         let lease_dir = match std::env::var_os(ENV_LEASE_DIR) {
             Some(dir) => PathBuf::from(dir),
@@ -75,6 +113,8 @@ impl HostConfig {
             kernel: locate::kernel(beside.as_deref())?.path,
             subuids,
             lease_dir,
+            vmm_log_level,
+            zram_percent,
         })
     }
 }
@@ -263,7 +303,11 @@ pub fn run(args: &LauncherArgs) -> Result<(), String> {
 
     // Firecracker has no exec/env injection: the guest init
     // sources its environment from the overlay, as with the QEMU backend.
-    let env = envfile::render(&args.vm_env, host_epoch_secs())?;
+    let env = envfile::render(
+        &args.vm_env,
+        host_epoch_secs(),
+        host.zram_mib(args.vm_mem_mib),
+    )?;
     envfile::write_into_overlay(overlay, &env)?;
 
     // Guest-initiated vsock connections reach `<uds>_<port>`, where this
@@ -329,6 +373,7 @@ pub fn run(args: &LauncherArgs) -> Result<(), String> {
         config: config_path,
         binds,
         sub: sub.is_some(),
+        log_level: host.vmm_log_level,
     };
     jail.validate()?;
 
@@ -399,12 +444,57 @@ mod tests {
             std::env::set_var(ENV_KERNEL, &kernel);
             std::env::set_var(ENV_LEASE_DIR, dir.path().join("leases"));
             std::env::remove_var(ENV_SUBUIDS);
+            std::env::remove_var(ENV_LOG_LEVEL);
+            std::env::remove_var(ENV_ZRAM_PERCENT);
         }
         let host = HostConfig::from_env().unwrap();
+        assert_eq!(host.zram_percent, 50, "half the memory by default");
+        assert_eq!(host.zram_mib(2048), 1024);
         assert_eq!(host.firecracker, bin);
         assert_eq!(host.kernel, kernel);
         assert_eq!(host.subuids, SubuidMode::Auto, "auto by default");
         assert_eq!(host.lease_dir, dir.path().join("leases"));
+        assert_eq!(host.vmm_log_level, VmmLogLevel::Warn, "warn by default");
+
+        unsafe {
+            std::env::set_var(ENV_LOG_LEVEL, "info");
+        }
+        assert_eq!(
+            HostConfig::from_env().unwrap().vmm_log_level,
+            VmmLogLevel::Info
+        );
+        unsafe {
+            std::env::set_var(ENV_LOG_LEVEL, "chatty");
+        }
+        assert!(HostConfig::from_env().is_err(), "bad log level");
+        unsafe {
+            std::env::remove_var(ENV_LOG_LEVEL);
+        }
+
+        for (value, percent) in [("0", 0), ("200", 200), ("", 50)] {
+            unsafe {
+                std::env::set_var(ENV_ZRAM_PERCENT, value);
+            }
+            assert_eq!(
+                HostConfig::from_env().unwrap().zram_percent,
+                percent,
+                "{value:?}"
+            );
+        }
+        assert_eq!(HostConfig::from_env().unwrap().zram_mib(4096), 2048);
+        unsafe {
+            std::env::set_var(ENV_ZRAM_PERCENT, "0");
+        }
+        assert_eq!(HostConfig::from_env().unwrap().zram_mib(4096), 0, "off");
+        for bad in ["201", "-1", "half", "50%"] {
+            unsafe {
+                std::env::set_var(ENV_ZRAM_PERCENT, bad);
+            }
+            assert!(HostConfig::from_env().is_err(), "{bad:?}");
+        }
+        unsafe {
+            std::env::remove_var(ENV_ZRAM_PERCENT);
+        }
 
         unsafe {
             std::env::set_var(ENV_SUBUIDS, "off");

@@ -148,8 +148,25 @@ pub(crate) struct FileRequest {
     pub refresh: bool,
 }
 
-/// Accept `overlay_disk_mib` as a whole number. `driver_config` arrives as a
-/// protobuf `Struct`, whose numbers are all `f64`.
+/// Accept `overlay_disk_mib` as a whole number of MiB.
+pub(crate) fn deserialize_optional_mib<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    optional_whole_mib(deserializer, "overlay_disk_mib")
+}
+
+/// Accept `mem_mib` as a whole number of MiB (not in upstream). The VM driver
+/// checks it against its memory limits.
+pub(crate) fn deserialize_optional_mem_mib<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    optional_whole_mib(deserializer, "mem_mib")
+}
+
+/// A whole, non-negative number of MiB in `field`. `driver_config` arrives as
+/// a protobuf `Struct`, whose numbers are all `f64`.
 // The f64 is checked to be a whole number in the exactly representable range
 // before it is converted.
 #[allow(
@@ -157,7 +174,7 @@ pub(crate) struct FileRequest {
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-pub(crate) fn deserialize_optional_mib<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+fn optional_whole_mib<'de, D>(deserializer: D, field: &str) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -175,12 +192,12 @@ where
                 {
                     Ok(Some(value as u64))
                 }
-                _ => Err(D::Error::custom(
-                    "overlay_disk_mib must be a whole, non-negative number of MiB",
-                )),
+                _ => Err(D::Error::custom(format!(
+                    "{field} must be a whole, non-negative number of MiB"
+                ))),
             }
         }
-        Some(_) => Err(D::Error::custom("overlay_disk_mib must be a number")),
+        Some(_) => Err(D::Error::custom(format!("{field} must be a number"))),
     }
 }
 

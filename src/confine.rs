@@ -76,6 +76,52 @@ impl Access {
     }
 }
 
+/// Firecracker's own log level (`--level`). Its diagnostics land in the
+/// sandbox's console log with the guest's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VmmLogLevel {
+    Off,
+    Error,
+    #[default]
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl VmmLogLevel {
+    /// The value Firecracker's `--level` takes.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Error => "Error",
+            Self::Warn => "Warn",
+            Self::Info => "Info",
+            Self::Debug => "Debug",
+            Self::Trace => "Trace",
+        }
+    }
+}
+
+impl std::str::FromStr for VmmLogLevel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "error" => Ok(Self::Error),
+            "warn" | "warning" => Ok(Self::Warn),
+            "info" => Ok(Self::Info),
+            "debug" => Ok(Self::Debug),
+            "trace" => Ok(Self::Trace),
+            _ => Err(format!(
+                "unknown Firecracker log level '{value}'; expected 'off', 'error', 'warn', \
+                 'info', 'debug' or 'trace'"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bind {
     pub path: PathBuf,
@@ -101,6 +147,8 @@ pub struct JailSpec {
     /// Run Firecracker as the subordinate uid the launcher maps into this
     /// user namespace ([`crate::subids`]), instead of the driver's user.
     pub sub: bool,
+    /// Firecracker's `--level`.
+    pub log_level: VmmLogLevel,
 }
 
 impl JailSpec {
@@ -165,6 +213,8 @@ impl JailSpec {
         if self.sub {
             args.push("--sub".into());
         }
+        args.push("--level".into());
+        args.push(self.log_level.as_str().into());
         for bind in &self.binds {
             args.push(bind.access.flag().into());
             args.push(bind.path.clone().into());
@@ -177,10 +227,16 @@ impl JailSpec {
         let mut config = None;
         let mut binds = Vec::new();
         let mut sub = false;
+        let mut log_level = VmmLogLevel::default();
         let mut iter = args.iter();
         while let Some(flag) = iter.next() {
             if flag.to_str() == Some("--sub") {
                 sub = true;
+                continue;
+            }
+            if flag.to_str() == Some("--level") {
+                let level = iter.next().ok_or("--level needs a value")?;
+                log_level = level.to_str().ok_or("--level is not UTF-8")?.parse()?;
                 continue;
             }
             let value = || format!("{} needs a value", flag.to_string_lossy());
@@ -199,6 +255,7 @@ impl JailSpec {
             config: config.ok_or("--config is required")?,
             binds,
             sub,
+            log_level,
         };
         spec.validate()?;
         Ok(spec)
@@ -529,7 +586,7 @@ fn run(spec: &JailSpec) -> Result<i32, String> {
         .arg("--no-api")
         .arg("--config-file")
         .arg(&spec.config)
-        .args(["--level", "Warn"])
+        .args(["--level", spec.log_level.as_str()])
         .stdin(std::process::Stdio::null());
     let sub = spec.sub;
     unsafe { command.pre_exec(move || harden_before_exec(sub)) };
@@ -559,6 +616,7 @@ mod tests {
                 Bind::new("/dev/kvm", Access::Device),
             ],
             sub: false,
+            log_level: VmmLogLevel::default(),
         }
     }
 
@@ -640,6 +698,46 @@ mod tests {
             JailSpec::parse(&os(&["--fc", "/fc", "--config", "/c", "--wat", "/x"])).is_err(),
             "unknown flag"
         );
+    }
+
+    #[test]
+    fn the_log_level_round_trips_and_defaults_to_warn() {
+        let default = spec().to_args();
+        let at = default.iter().position(|arg| arg == "--level").unwrap();
+        assert_eq!(default[at + 1], "Warn");
+
+        let info = JailSpec {
+            log_level: VmmLogLevel::Info,
+            ..spec()
+        };
+        assert_eq!(JailSpec::parse(&info.to_args()[1..]).unwrap(), info);
+
+        let os = |parts: &[&str]| parts.iter().map(OsString::from).collect::<Vec<_>>();
+        let bare = JailSpec::parse(&os(&["--fc", "/fc", "--config", "/c"])).unwrap();
+        assert_eq!(bare.log_level, VmmLogLevel::Warn, "absent means warn");
+        assert!(JailSpec::parse(&os(&["--fc", "/fc", "--config", "/c", "--level"])).is_err());
+        assert!(
+            JailSpec::parse(&os(&["--fc", "/fc", "--config", "/c", "--level", "loud"])).is_err()
+        );
+    }
+
+    #[test]
+    fn log_levels_parse_case_insensitively() {
+        assert_eq!("info".parse::<VmmLogLevel>(), Ok(VmmLogLevel::Info));
+        assert_eq!("DEBUG".parse::<VmmLogLevel>(), Ok(VmmLogLevel::Debug));
+        assert_eq!("Warning".parse::<VmmLogLevel>(), Ok(VmmLogLevel::Warn));
+        assert_eq!("off".parse::<VmmLogLevel>(), Ok(VmmLogLevel::Off));
+        assert!("verbose".parse::<VmmLogLevel>().is_err());
+        for level in [
+            VmmLogLevel::Off,
+            VmmLogLevel::Error,
+            VmmLogLevel::Warn,
+            VmmLogLevel::Info,
+            VmmLogLevel::Debug,
+            VmmLogLevel::Trace,
+        ] {
+            assert_eq!(level.as_str().parse::<VmmLogLevel>(), Ok(level));
+        }
     }
 
     #[test]

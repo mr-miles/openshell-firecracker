@@ -387,6 +387,30 @@ install_config() {
             "$LIBEXEC/openshell-firecracker-launcher" >> "$envfile"
         say "added OPENSHELL_VM_LAUNCHER_BIN to $envfile"
     fi
+    # Show newer optional settings in a kept env file too, commented out so the
+    # behavior does not change.
+    if [ -f "$envfile" ] && ! grep -q 'OPENSHELL_VM_FIRECRACKER_LOG_LEVEL' "$envfile"; then
+        printf '\n%s\n%s\n%s\n' \
+            "# Added by install.sh. Firecracker's own log level, written to each sandbox's" \
+            "# rootfs-console.log: off, error, warn (default), info, debug or trace." \
+            "# OPENSHELL_VM_FIRECRACKER_LOG_LEVEL=warn" >> "$envfile"
+        say "added a commented-out OPENSHELL_VM_FIRECRACKER_LOG_LEVEL to $envfile"
+    fi
+    if [ -f "$envfile" ] && ! grep -q 'OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT' "$envfile"; then
+        printf '\n%s\n%s\n%s\n%s\n' \
+            "# Added by install.sh. Compressed swap (zram) in each guest, as a percentage of" \
+            "# its memory: 0 to 200, 0 for none. Raise OPENSHELL_VM_DRIVER_MEM_MIB (default" \
+            "# 2048) to give VMs more memory." \
+            "# OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT=50" >> "$envfile"
+        say "added a commented-out OPENSHELL_VM_FIRECRACKER_ZRAM_PERCENT to $envfile"
+    fi
+    if [ -f "$envfile" ] && ! grep -q 'OPENSHELL_VM_MAX_MEM_MIB' "$envfile"; then
+        printf '\n%s\n%s\n%s\n' \
+            "# Added by install.sh. Largest driver_config.mem_mib a sandbox may ask for." \
+            "# Unset: no more than the default memory, OPENSHELL_VM_DRIVER_MEM_MIB (2048)." \
+            "# OPENSHELL_VM_MAX_MEM_MIB=8192" >> "$envfile"
+        say "added a commented-out OPENSHELL_VM_MAX_MEM_MIB to $envfile"
+    fi
 }
 
 [ "$DO_BINARIES" -eq 0 ] || install_binaries
