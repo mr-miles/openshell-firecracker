@@ -410,6 +410,7 @@ driver inherits:
 | `OPENSHELL_VM_FIRECRACKER_KERNEL` | Optional. Absolute path to the guest `vmlinux`. Default: `vmlinux` beside the launcher, or in `/usr/local/libexec/openshell-firecracker`, `/var/lib/openshell-firecracker` |
 | `OPENSHELL_VM_FIRECRACKER_SUBUIDS` | `auto` (default), `required`, or `off`; see [Per-VM uid](#per-vm-uid) |
 | `OPENSHELL_VM_FIRECRACKER_LEASE_DIR` | Sub-uid lease directory. Defaults to `$XDG_RUNTIME_DIR/openshell-firecracker-leases` |
+| `OPENSHELL_VM_FIRECRACKER_LOG_LEVEL` | Firecracker's own log level: `off`, `error`, `warn` (default), `info`, `debug` or `trace`. Firecracker's messages go to `rootfs-console.log` |
 | `OPENSHELL_FIRECRACKER_DRIVER` | Path of the driver, if it cannot be found from the launcher's parent |
 
 The driver's `OPENSHELL_VM_DEFAULT_WORKDIR` (default `/sandbox`) sets the working directory for
@@ -700,6 +701,7 @@ socket_path`) at v0.1.6 and at the vendored commit.
 | Create fails mentioning launch authentication | The gateway has no `gateway_jwt` signing bundle |
 | Guest hangs or panics at boot | Read `rootfs-console.log`. The release kernel is built by `kernel/build.sh`, which fails if a required option is missing; a kernel you supplied needs the same options |
 | Handshake fails with a certificate not-yet-valid error | Guest clock; check `date` in the console log |
+| Sandbox dies with `boundary terminated: boundary lost during wait`, or the guest logs `Sandbox Protocol connection lost` | The supervisor connection over vsock was cut. The launcher logs every relay of that connection to the driver's stderr (`journalctl --user -u openshell-driver-firecracker`), with host timestamps: `vsock relay N: opened`, then one line per direction saying when it ended and why. The direction that ended first, and whether it was a clean close or an error, shows which side dropped it. Set `OPENSHELL_VM_FIRECRACKER_LOG_LEVEL=info` for more of Firecracker's own messages in `rootfs-console.log` |
 | Launcher says the guest environment file was not written | `debugfs` missing or the overlay path has spaces or quotes |
 
 ## Development

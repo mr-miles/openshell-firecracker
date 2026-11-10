@@ -21,7 +21,7 @@ use std::process::{Command, Stdio};
 use crate::bridge;
 use crate::cli::LauncherArgs;
 use crate::config::{VSOCK_UDS_NAME, VmmConfig, bridge_socket_name};
-use crate::confine::{Access, Bind, JailSpec};
+use crate::confine::{Access, Bind, JailSpec, VmmLogLevel};
 use crate::console::pump;
 use crate::envfile;
 use crate::locate;
@@ -39,6 +39,9 @@ pub const ENV_KERNEL: &str = "OPENSHELL_VM_FIRECRACKER_KERNEL";
 pub const ENV_SUBUIDS: &str = "OPENSHELL_VM_FIRECRACKER_SUBUIDS";
 /// Directory of sub-uid lease files shared by all launchers of one driver.
 pub const ENV_LEASE_DIR: &str = "OPENSHELL_VM_FIRECRACKER_LEASE_DIR";
+/// Firecracker's own log level: `off`, `error`, `warn` (default), `info`,
+/// `debug` or `trace`.
+pub const ENV_LOG_LEVEL: &str = "OPENSHELL_VM_FIRECRACKER_LOG_LEVEL";
 
 const VMM_CONFIG_FILE: &str = "firecracker.json";
 
@@ -49,6 +52,7 @@ pub struct HostConfig {
     pub kernel: PathBuf,
     pub subuids: SubuidMode,
     pub lease_dir: PathBuf,
+    pub vmm_log_level: VmmLogLevel,
 }
 
 impl HostConfig {
@@ -56,6 +60,10 @@ impl HostConfig {
         let subuids = match std::env::var(ENV_SUBUIDS) {
             Ok(value) => value.parse()?,
             Err(_) => SubuidMode::default(),
+        };
+        let vmm_log_level = match std::env::var(ENV_LOG_LEVEL) {
+            Ok(value) if !value.is_empty() => value.parse()?,
+            _ => VmmLogLevel::default(),
         };
         let lease_dir = match std::env::var_os(ENV_LEASE_DIR) {
             Some(dir) => PathBuf::from(dir),
@@ -75,6 +83,7 @@ impl HostConfig {
             kernel: locate::kernel(beside.as_deref())?.path,
             subuids,
             lease_dir,
+            vmm_log_level,
         })
     }
 }
@@ -329,6 +338,7 @@ pub fn run(args: &LauncherArgs) -> Result<(), String> {
         config: config_path,
         binds,
         sub: sub.is_some(),
+        log_level: host.vmm_log_level,
     };
     jail.validate()?;
 
@@ -399,12 +409,26 @@ mod tests {
             std::env::set_var(ENV_KERNEL, &kernel);
             std::env::set_var(ENV_LEASE_DIR, dir.path().join("leases"));
             std::env::remove_var(ENV_SUBUIDS);
+            std::env::remove_var(ENV_LOG_LEVEL);
         }
         let host = HostConfig::from_env().unwrap();
         assert_eq!(host.firecracker, bin);
         assert_eq!(host.kernel, kernel);
         assert_eq!(host.subuids, SubuidMode::Auto, "auto by default");
         assert_eq!(host.lease_dir, dir.path().join("leases"));
+        assert_eq!(host.vmm_log_level, VmmLogLevel::Warn, "warn by default");
+
+        unsafe {
+            std::env::set_var(ENV_LOG_LEVEL, "info");
+        }
+        assert_eq!(HostConfig::from_env().unwrap().vmm_log_level, VmmLogLevel::Info);
+        unsafe {
+            std::env::set_var(ENV_LOG_LEVEL, "chatty");
+        }
+        assert!(HostConfig::from_env().is_err(), "bad log level");
+        unsafe {
+            std::env::remove_var(ENV_LOG_LEVEL);
+        }
 
         unsafe {
             std::env::set_var(ENV_SUBUIDS, "off");
