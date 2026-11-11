@@ -48,7 +48,7 @@ The guest has no network device.
 ## The vendored driver
 
 `vendor/openshell` holds one crate: OpenShell's VM driver (`openshell-driver-vm`), taken from
-NVIDIA/OpenShell release `v0.1.7` (commit `5d25211`, pinned in [`driver/UPSTREAM.env`](driver/UPSTREAM.env)) and
+NVIDIA/OpenShell release `v0.1.8` (commit `f3d9765`, pinned in [`driver/UPSTREAM.env`](driver/UPSTREAM.env)) and
 trimmed. It is its own cargo workspace. The other OpenShell crates it uses (`openshell-core`
 and friends) are **git dependencies on the same commit**, not copies, so building needs
 network access to GitHub. The changes from upstream are listed in
@@ -61,8 +61,8 @@ pinned commit when a release is made. `mise run driver:check-pin` fails if the r
 ### Compatibility
 
 The supervisor protocol is not stable across OpenShell revisions, so the gateway must come
-from a revision compatible with the one in `driver/UPSTREAM.env`, currently the `v0.1.7`
-release, so run a `v0.1.7` gateway. Other releases have not been checked. `install.sh` prints
+from a revision compatible with the one in `driver/UPSTREAM.env`, currently the `v0.1.8`
+release, so run a `v0.1.8` gateway. Other releases have not been checked. `install.sh` prints
 the commit the installed driver was built from and the gateway's reported version, and leaves
 the comparison to you.
 
