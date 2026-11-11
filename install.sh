@@ -26,6 +26,7 @@ SUBUIDS=1
 FIRECRACKER=""                   # version to install, or empty to leave Firecracker alone
 RUN_USER=""
 DRY_RUN=0
+FROM=""                          # local directory of assets, instead of a release
 
 usage() {
     cat <<'EOF'
@@ -50,6 +51,10 @@ escaped its jail holds a uid owning nothing on the host, this gives NAME a range
 installs a udev rule making /dev/kvm world read/write. That last part lets every local
 user use KVM; skip it all with --no-subuids and the plugin runs VMMs as NAME instead.
   --repo OWNER/NAME        GitHub repository to download from (set in release copies)
+  --from DIR               install from DIR instead of a release: a directory holding the
+                           release assets and a SHA256SUMS covering them (for example the
+                           release workflow's artifacts, unzipped into one place, with
+                           examples.tar.gz added). --version and --repo are then ignored
   --dry-run                print what would happen; download and change nothing
   -h, --help               this help
 EOF
@@ -76,6 +81,7 @@ while [ $# -gt 0 ]; do
         --no-subuids) SUBUIDS=0; shift ;;
         --user) RUN_USER="${2:?--user needs a value}"; shift 2 ;;
         --repo) REPO="${2:?--repo needs a value}"; shift 2 ;;
+        --from) FROM="${2:?--from needs a directory}"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h | --help) usage; exit 0 ;;
         *) usage >&2; die "unknown option: $1" ;;
@@ -92,7 +98,15 @@ case "$(uname -m)" in
     *) die "unsupported architecture $(uname -m): only x86_64 release assets are built" ;;
 esac
 
-if [ "$TAG" = latest ]; then
+if [ -n "$FROM" ]; then
+    [ -d "$FROM" ] || die "--from: not a directory: $FROM"
+    FROM="$(cd "$FROM" && pwd -P)"
+    # BASE is a file:// URL for curl, so keep to characters that need no escaping.
+    [[ "$FROM" =~ ^[A-Za-z0-9_./+-]+$ ]] || die "--from: use a path without spaces or special characters: $FROM"
+    [ "$DRY_RUN" -eq 1 ] || [ -f "$FROM/SHA256SUMS" ] \
+        || die "--from: no SHA256SUMS in $FROM (create it with: cd $FROM && sha256sum -- * > SHA256SUMS)"
+    BASE="file://$FROM"
+elif [ "$TAG" = latest ]; then
     BASE="https://github.com/$REPO/releases/latest/download"
 else
     BASE="https://github.com/$REPO/releases/download/$TAG"
@@ -132,7 +146,7 @@ fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
     say "Dry run: nothing is downloaded or changed."
-    say "Release:  $REPO ($TAG)"
+    if [ -n "$FROM" ]; then say "From:     $FROM"; else say "Release:  $REPO ($TAG)"; fi
     if [ "$DO_BINARIES" -eq 1 ]; then
         say "Download: $BASE/$LAUNCHER_ASSET"
         [ -z "$DRIVER_ASSET" ] || say "Download: $BASE/$DRIVER_ASSET"

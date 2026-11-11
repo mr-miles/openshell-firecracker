@@ -217,6 +217,23 @@ your own); `--launcher-only` skips the driver, if you build `vendor/openshell` y
 The guest kernel is installed as `vmlinux` beside the launcher, where the launcher looks for
 it; set `OPENSHELL_VM_FIRECRACKER_KERNEL` only to use another one.
 
+To install a build that is not a release, such as a manual run of the Release workflow,
+point `--from` at a directory holding the assets. That run's `launcher`, `kernel` and
+`driver` artifacts lack `examples.tar.gz` and `SHA256SUMS`, which only the publish step adds,
+so make those too. From a checkout of this repository:
+
+```shell
+dir=$(mktemp -d)
+for z in launcher.zip kernel.zip driver.zip; do unzip -o "$z" -d "$dir"; done
+tar -czf "$dir/examples.tar.gz" examples
+(cd "$dir" && sha256sum -- * > SHA256SUMS)
+sudo ./install.sh --from "$dir" --binaries-only
+./install.sh --from "$dir" --config-only
+```
+
+A `SHA256SUMS` you make yourself only catches damaged files; it does not show where they came
+from.
+
 ### 4. Host setup
 
 One-off, per host:
