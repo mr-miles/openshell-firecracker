@@ -53,7 +53,7 @@ trimmed. It is its own cargo workspace. The other OpenShell crates it uses (`ope
 and friends) are **git dependencies on the same commit**, not copies, so building needs
 network access to GitHub. The changes from upstream are listed in
 [its README](vendor/openshell/crates/openshell-driver-vm/README.md): image `ENV` and
-`WORKDIR`, `OPENSHELL_VM_LAUNCHER_BIN`, and the removal of everything Firecracker does not
+`WORKDIR`, `OPENSHELL_VM_LAUNCHER_BIN`, image sources ([Image sources](#image-sources)), and the removal of everything Firecracker does not
 use. The host supervisor and guest sandbox binaries the driver embeds are built from the same
 pinned commit when a release is made. `mise run driver:check-pin` fails if the revision in
 `vendor/openshell/Cargo.toml` and the one in `driver/UPSTREAM.env` differ.
@@ -440,6 +440,9 @@ The driver's `OPENSHELL_VM_MAX_MEM_MIB`, `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`,
 [Per-sandbox memory, disk size and files](#per-sandbox-memory-disk-size-and-files).
 The driver's `OPENSHELL_VM_IMAGE_CACHE_MAX_IDLE_HOURS` (default 48, 0 to keep everything)
 sets when unused image disks are removed; see [Image cache cleanup](#image-cache-cleanup).
+The driver's `OPENSHELL_VM_LOCAL_IMAGE_SOURCE` (default `auto`) and
+`OPENSHELL_VM_LOCAL_IMAGE_SOURCE_SOCKET` choose where image names without a registry host
+come from; see [Image sources](#image-sources).
 
 The driver itself needs `OPENSHELL_GRPC_ENDPOINT` (required), `OPENSHELL_VM_TLS_CA` for an
 `https://` endpoint, `OPENSHELL_VM_DRIVER_STATE_DIR`, at least one of
@@ -558,6 +561,37 @@ again. The files are copies, not mounts: changes on the host reach the guest onl
 
 The sandbox policy still governs what the workload can access. Add a target outside the
 workdir to the policy's filesystem paths if the workload needs to read or write it.
+
+## Image sources
+
+The driver decides where an image comes from by its name alone, so each name has exactly one
+source:
+
+- **A name with a registry host** always comes from that registry, even if Docker or Podman
+  has an image with the same name. A host is a first component, before the first `/`, that
+  contains a `.` or a `:` (a port): `192.168.1.239:5000/app:latest`, `ghcr.io/org/app`,
+  `localhost:5000/app`. Each start asks the registry which digest the tag points to; a disk
+  already prepared for that digest is reused, otherwise the layers are pulled.
+- **A name without one** comes only from the local container engine: `app:latest`,
+  `myuser/app`, and `localhost/app` (where Podman keeps images it builds). If the image is
+  not there, the start fails; the driver never falls back to a registry. There is no
+  implicit Docker Hub: write `docker.io/library/ubuntu:24.04`, not `ubuntu:24.04`.
+
+Upstream looks every name up in Docker or Podman first and only then asks the registry, so
+an outdated local copy of `192.168.1.239:5000/app:latest` silently replaces what was pushed.
+
+| `OPENSHELL_VM_LOCAL_IMAGE_SOURCE` | Socket used when `OPENSHELL_VM_LOCAL_IMAGE_SOURCE_SOCKET` is unset |
+|---|---|
+| `auto` (default) | `/var/run/docker.sock`, then `$XDG_RUNTIME_DIR/podman/podman.sock`, then `/run/user/<uid>/podman/podman.sock`. None answering means no local engine |
+| `docker` | `/var/run/docker.sock` |
+| `podman` | `$XDG_RUNTIME_DIR/podman/podman.sock`, then `/run/user/<uid>/podman/podman.sock` |
+| `off` | None: every image name needs a registry host |
+
+`OPENSHELL_VM_LOCAL_IMAGE_SOURCE_SOCKET` (a path or `unix://` URL) replaces the mode's
+sockets; it cannot be combined with `off`, and `tcp://` and `ssh://` are refused. The
+driver does not read `DOCKER_HOST`, `OPENSHELL_PODMAN_SOCKET` or Docker contexts. Rootless
+Podman only has its socket while its user unit runs: `systemctl --user enable --now
+podman.socket`. The driver logs its mode and sockets when it starts.
 
 ## Image cache cleanup
 

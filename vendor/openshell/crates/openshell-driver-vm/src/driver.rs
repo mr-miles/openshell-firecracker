@@ -103,7 +103,7 @@ use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use tracing::{Instrument as _, info, warn};
+use tracing::{Instrument as _, debug, info, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use url::{Host, Url};
 
@@ -426,6 +426,11 @@ pub struct VmDriverConfig {
     /// driver binary defaults to [`DEFAULT_IMAGE_CACHE_MAX_IDLE_HOURS`].
     #[serde(default)]
     pub image_cache_max_idle_hours: u64,
+
+    /// Where image names without a registry host come from (not in upstream).
+    /// See [`crate::local_images`].
+    #[serde(default)]
+    pub local_image_source: crate::local_images::LocalImageSourceConfig,
 }
 
 /// Redacting `Debug` so a proxy URL or credential path never reaches a log.
@@ -497,6 +502,7 @@ impl std::fmt::Debug for VmDriverConfig {
                 "image_cache_max_idle_hours",
                 &self.image_cache_max_idle_hours,
             )
+            .field("local_image_source", &self.local_image_source)
             .finish()
     }
 }
@@ -546,6 +552,7 @@ impl Default for VmDriverConfig {
             supervisor_identity: crate::supervisor_identity::SupervisorIdentityConfig::default(),
             sandbox_storage: crate::sandbox_storage::SandboxStorageConfig::default(),
             image_cache_max_idle_hours: 0,
+            local_image_source: crate::local_images::LocalImageSourceConfig::default(),
         }
     }
 }
@@ -1273,6 +1280,12 @@ impl VmDriver {
             .map_err(|err| err.message().to_string())?;
         config.validate_sandbox_identity()?;
         config.validate_runtime_security_config()?;
+        config.local_image_source.validate()?;
+        info!(
+            mode = config.local_image_source.mode.as_str(),
+            sockets = ?config.local_image_source.socket_candidates(),
+            "vm driver: local image source (names without a registry host; names with one always use their registry)"
+        );
         config.validate_bootstrap_image_config()?;
         config.validate_rootfs_tar_config()?;
         config
@@ -4105,77 +4118,85 @@ impl VmDriver {
         span_status.finish(Ok(image_identity))
     }
 
+    /// Find a local image for a name without a registry host (not in upstream:
+    /// upstream looks every name up locally first and falls back to the
+    /// registry). `Ok(None)` means the name has a registry host and must come
+    /// from that registry. A name without one comes only from the configured
+    /// local engine, so a missing image is an error, never a registry pull.
     async fn resolve_local_container_image(
         &self,
         image_ref: &str,
     ) -> Result<Option<(Docker, String)>, Status> {
-        let required_local_image = is_openshell_local_build_image_ref(image_ref);
-        let engine = match connect_local_container_engine().await {
-            Some(engine) => engine,
-            None if required_local_image => {
+        if crate::local_images::image_ref_has_registry_host(image_ref) {
+            debug!(
+                image_ref = %image_ref,
+                "vm driver: image names a registry host, skipping the local engine"
+            );
+            return Ok(None);
+        }
+        let qualified = crate::local_images::docker_hub_name(image_ref);
+        let source = &self.config.local_image_source;
+        if source.mode == crate::local_images::LocalImageSourceMode::Off {
+            return Err(Status::failed_precondition(format!(
+                "sandbox image '{image_ref}' has no registry host and local images are off \
+                 ({}=off); use a full registry name such as '{qualified}'",
+                crate::local_images::LOCAL_IMAGE_SOURCE_ENV
+            )));
+        }
+        let candidates = source.socket_candidates();
+        let Some((engine, socket)) = connect_local_container_engine(&candidates).await else {
+            let tried = candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Status::failed_precondition(format!(
+                "sandbox image '{image_ref}' has no registry host, so it must come from a local \
+                 container engine, but none answered on {tried} ({}={}); start one, set {}, or \
+                 use a full registry name such as '{qualified}'",
+                crate::local_images::LOCAL_IMAGE_SOURCE_ENV,
+                source.mode.as_str(),
+                crate::local_images::LOCAL_IMAGE_SOURCE_SOCKET_ENV,
+            )));
+        };
+        let socket = socket.display();
+
+        let inspect = match engine.inspect_image(image_ref).await {
+            Ok(inspect) => inspect,
+            Err(err) if is_docker_not_found_error(&err) => {
                 return Err(Status::failed_precondition(format!(
-                    "no container engine (Docker/Podman) available for locally built sandbox image '{image_ref}'"
+                    "sandbox image '{image_ref}' is not in the local container engine at {socket}; build or \
+                     pull it there, or use a full registry name such as '{qualified}'"
                 )));
             }
-            None => {
-                warn!(
-                    image_ref = %image_ref,
-                    "vm driver: no local container engine available, falling back to registry"
-                );
-                return Ok(None);
+            Err(err) => {
+                return Err(Status::failed_precondition(format!(
+                    "failed to inspect sandbox image '{image_ref}' in the local container engine at {socket}: {err}"
+                )));
             }
         };
-
-        match engine.inspect_image(image_ref).await {
-            Ok(inspect) => {
-                if let Some(message) = local_image_platform_mismatch(
-                    image_ref,
-                    inspect.os.as_deref(),
-                    inspect.architecture.as_deref(),
-                ) {
-                    if required_local_image {
-                        return Err(Status::failed_precondition(message));
-                    }
-                    warn!(
-                        image_ref = %image_ref,
-                        %message,
-                        "vm driver: local container image platform mismatch, falling back to registry"
-                    );
-                    return Ok(None);
-                }
-
-                let image_identity = inspect.id.filter(|id| !id.trim().is_empty()).ok_or_else(
-                    || {
-                        Status::failed_precondition(format!(
-                            "local container image '{image_ref}' inspect response has no image ID"
-                        ))
-                    },
-                )?;
-                info!(
-                    image_ref = %image_ref,
-                    image_identity = %image_identity,
-                    "vm driver: resolved image from local container engine"
-                );
-                Ok(Some((engine, image_identity)))
-            }
-            Err(err) if is_docker_not_found_error(&err) && required_local_image => {
-                Err(Status::failed_precondition(format!(
-                    "locally built sandbox image '{image_ref}' is not present in the local container engine"
-                )))
-            }
-            Err(err) if is_docker_not_found_error(&err) => Ok(None),
-            Err(err) if required_local_image => Err(Status::failed_precondition(format!(
-                "failed to inspect locally built sandbox image '{image_ref}': {err}"
-            ))),
-            Err(err) => {
-                warn!(
-                    image_ref = %image_ref,
-                    error = %err,
-                    "vm driver: local container image inspection failed, falling back to registry"
-                );
-                Ok(None)
-            }
+        if let Some(message) = local_image_platform_mismatch(
+            image_ref,
+            inspect.os.as_deref(),
+            inspect.architecture.as_deref(),
+        ) {
+            return Err(Status::failed_precondition(message));
         }
+        let image_identity = inspect
+            .id
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                Status::failed_precondition(format!(
+                    "local container image '{image_ref}' inspect response has no image ID"
+                ))
+            })?;
+        info!(
+            image_ref = %image_ref,
+            image_identity = %image_identity,
+            socket = %socket,
+            "vm driver: resolved image from local container engine"
+        );
+        Ok(Some((engine, image_identity)))
     }
 
     async fn ensure_cached_local_image_rootfs_image(
@@ -5819,39 +5840,36 @@ fn parse_registry_reference(image_ref: &str) -> Result<Reference, Status> {
     })
 }
 
-/// Try to connect to a local container engine (Docker or Podman).
-///
-/// Tries Docker first (`connect_with_local_defaults`, which respects
-/// `DOCKER_HOST`). If Docker is unavailable, falls back to the Podman
-/// socket, which exposes a Docker-compatible API.
-async fn connect_local_container_engine() -> Option<Docker> {
-    if let Ok(docker) = Docker::connect_with_local_defaults()
-        && docker.ping().await.is_ok()
-    {
-        return Some(docker);
+/// Connect to the first local container engine socket that answers (not in
+/// upstream, which tries `DOCKER_HOST` and then searches for Podman). Podman
+/// serves the same Docker-compatible API, so both use one client.
+async fn connect_local_container_engine(candidates: &[PathBuf]) -> Option<(Docker, PathBuf)> {
+    for socket in candidates {
+        if tokio::fs::metadata(socket).await.is_err() {
+            debug!(socket = %socket.display(), "vm driver: no local container engine socket");
+            continue;
+        }
+        let Some(path) = socket.to_str() else {
+            warn!(socket = %socket.display(), "vm driver: socket path is not UTF-8, skipping");
+            continue;
+        };
+        match Docker::connect_with_unix(path, 120, bollard::API_DEFAULT_VERSION) {
+            Ok(docker) => match docker.ping().await {
+                Ok(_) => return Some((docker, socket.clone())),
+                Err(err) => warn!(
+                    socket = %socket.display(),
+                    error = %err,
+                    "vm driver: local container engine socket did not answer"
+                ),
+            },
+            Err(err) => warn!(
+                socket = %socket.display(),
+                error = %err,
+                "vm driver: cannot connect to local container engine socket"
+            ),
+        }
     }
-
-    let podman_socket = detect_podman_socket()?;
-    if let Ok(docker) =
-        Docker::connect_with_unix(podman_socket.to_str()?, 120, bollard::API_DEFAULT_VERSION)
-        && docker.ping().await.is_ok()
-    {
-        info!(
-            socket = %podman_socket.display(),
-            "vm driver: connected to Podman (Docker-compatible API)"
-        );
-        return Some(docker);
-    }
-
     None
-}
-
-fn detect_podman_socket() -> Option<PathBuf> {
-    crate::podman_socket::detect_socket()
-}
-
-fn is_openshell_local_build_image_ref(image_ref: &str) -> bool {
-    image_ref.starts_with("openshell/sandbox-from:")
 }
 
 fn local_image_platform_mismatch(
@@ -12239,17 +12257,6 @@ mod tests {
             image_reference_registry_host("localhost:5000/example/sandbox:dev"),
             "localhost:5000"
         );
-    }
-
-    #[test]
-    fn openshell_local_build_image_ref_matches_cli_tags() {
-        assert!(is_openshell_local_build_image_ref(
-            "openshell/sandbox-from:123"
-        ));
-        assert!(!is_openshell_local_build_image_ref("ubuntu:24.04"));
-        assert!(!is_openshell_local_build_image_ref(
-            "ghcr.io/nvidia/openshell/base:latest"
-        ));
     }
 
     #[test]
