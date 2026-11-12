@@ -283,6 +283,17 @@ struct Args {
         default_value_t = openshell_driver_vm::driver::DEFAULT_IMAGE_CACHE_MAX_IDLE_HOURS
     )]
     image_cache_max_idle_hours: u64,
+
+    /// Where image names without a registry host come from: `auto` (Docker's
+    /// default socket, then Podman's), `docker`, `podman` or `off`. Names with a
+    /// registry host always come from that registry.
+    #[arg(long, env = "OPENSHELL_VM_LOCAL_IMAGE_SOURCE", default_value = "auto")]
+    local_image_source: String,
+
+    /// Socket of the local container engine (a path or `unix://` URL), replacing
+    /// the mode's defaults.
+    #[arg(long, env = "OPENSHELL_VM_LOCAL_IMAGE_SOURCE_SOCKET")]
+    local_image_source_socket: Option<String>,
 }
 
 #[tokio::main]
@@ -376,6 +387,11 @@ async fn main() -> Result<()> {
             max_files_bytes: args.files_max_bytes,
         },
         image_cache_max_idle_hours: args.image_cache_max_idle_hours,
+        local_image_source: openshell_driver_vm::local_images::LocalImageSourceConfig::parse(
+            &args.local_image_source,
+            args.local_image_source_socket.as_deref(),
+        )
+        .map_err(|err| miette::miette!("{err}"))?,
     })
     .await
     .map_err(|err| miette::miette!("{err}"))?;

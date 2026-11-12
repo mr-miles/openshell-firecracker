@@ -540,3 +540,197 @@ async fn bootstrap_registry_cache_hit_for_a_digest_pin_makes_no_registry_request
         registry.requests()
     );
 }
+
+/// A fake Docker-compatible engine on a Unix socket: answers ping, version
+/// and image inspect for `images` (name -> image ID).
+fn fake_engine(socket: &Path, images: HashMap<String, String>) -> JoinHandle<()> {
+    let listener = tokio::net::UnixListener::bind(socket).unwrap();
+    let images = Arc::new(images);
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let images = images.clone();
+            tokio::spawn(async move {
+                loop {
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        match stream.read_u8().await {
+                            Ok(byte) => request.push(byte),
+                            Err(_) => return,
+                        }
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    let path = request.split_whitespace().nth(1).unwrap().to_string();
+                    let (status, body) = if path.ends_with("/_ping") {
+                        ("200 OK", "OK".to_string())
+                    } else if path.ends_with("/version") {
+                        (
+                            "200 OK",
+                            r#"{"Version":"5.0.0","Components":[{"Name":"Podman Engine","Version":"5.0.0"}]}"#
+                                .to_string(),
+                        )
+                    } else if let Some(name) = path
+                        .split_once("/images/")
+                        .and_then(|(_, rest)| rest.strip_suffix("/json"))
+                    {
+                        let name = name.replace("%2F", "/").replace("%3A", ":");
+                        images.get(&name).map_or_else(
+                            || {
+                                (
+                                    "404 Not Found",
+                                    format!(r#"{{"message":"No such image: {name}"}}"#),
+                                )
+                            },
+                            |id| {
+                                (
+                                    "200 OK",
+                                    format!(
+                                        r#"{{"Id":"{id}","Os":"linux","Architecture":"{}"}}"#,
+                                        linux_oci_arch()
+                                    ),
+                                )
+                            },
+                        )
+                    } else {
+                        ("404 Not Found", r#"{"message":"unexpected"}"#.to_string())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    if stream.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    })
+}
+
+fn driver_with_local_source(root: &Path, mode: &str, socket: Option<&Path>) -> VmDriver {
+    let mut driver = driver(root);
+    driver.config.local_image_source = crate::local_images::LocalImageSourceConfig::parse(
+        mode,
+        socket.map(|path| path.to_str().unwrap()),
+    )
+    .unwrap();
+    driver
+}
+
+#[tokio::test]
+async fn names_with_a_registry_host_never_use_the_local_engine() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("engine.sock");
+    let image = "192.168.1.239:5000/app:latest";
+    let _engine = fake_engine(
+        &socket,
+        HashMap::from([(image.into(), "sha256:stale".into())]),
+    );
+    let driver = driver_with_local_source(temp.path(), "podman", Some(&socket));
+
+    assert!(
+        driver
+            .resolve_local_container_image(image)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn names_without_a_host_come_from_the_local_engine() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("engine.sock");
+    let _engine = fake_engine(
+        &socket,
+        HashMap::from([("localhost/app:latest".into(), "sha256:local".into())]),
+    );
+    let driver = driver_with_local_source(temp.path(), "auto", Some(&socket));
+
+    let (_, identity) = driver
+        .resolve_local_container_image("localhost/app:latest")
+        .await
+        .unwrap()
+        .expect("local image");
+    assert_eq!(identity, "sha256:local");
+
+    let err = driver
+        .resolve_local_container_image("app:latest")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    let message = err.message();
+    assert!(
+        message.contains("is not in the local container engine at"),
+        "{message}"
+    );
+    assert!(message.contains(socket.to_str().unwrap()), "{message}");
+    assert!(
+        message.contains("docker.io/library/app:latest"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn names_without_a_host_fail_when_no_engine_answers() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("missing.sock");
+    let driver = driver_with_local_source(temp.path(), "docker", Some(&socket));
+
+    let err = driver
+        .resolve_local_container_image("myuser/app:1.0")
+        .await
+        .unwrap_err();
+    let message = err.message();
+    assert!(message.contains(socket.to_str().unwrap()), "{message}");
+    assert!(
+        message.contains("OPENSHELL_VM_LOCAL_IMAGE_SOURCE=docker"),
+        "{message}"
+    );
+    assert!(
+        message.contains("OPENSHELL_VM_LOCAL_IMAGE_SOURCE_SOCKET"),
+        "{message}"
+    );
+    assert!(message.contains("docker.io/myuser/app:1.0"), "{message}");
+}
+
+#[tokio::test]
+async fn names_without_a_host_fail_when_local_images_are_off() {
+    let temp = tempfile::tempdir().unwrap();
+    let driver = driver_with_local_source(temp.path(), "off", None);
+
+    let err = driver
+        .resolve_local_container_image("openshell/sandbox-from:123")
+        .await
+        .unwrap_err();
+    let message = err.message();
+    assert!(message.contains("local images are off"), "{message}");
+    assert!(
+        message.contains("docker.io/openshell/sandbox-from:123"),
+        "{message}"
+    );
+    assert!(
+        driver
+            .resolve_local_container_image("ghcr.io/org/app:1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn driver_refuses_a_socket_with_local_images_off() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = VmDriverConfig {
+        state_dir: temp.path().to_path_buf(),
+        local_image_source: crate::local_images::LocalImageSourceConfig {
+            mode: crate::local_images::LocalImageSourceMode::Off,
+            socket: Some(temp.path().join("engine.sock")),
+        },
+        ..Default::default()
+    };
+    let Err(err) = VmDriver::new(config).await else {
+        panic!("driver should refuse the configuration");
+    };
+    assert!(err.contains("unset one of them"), "{err}");
+}

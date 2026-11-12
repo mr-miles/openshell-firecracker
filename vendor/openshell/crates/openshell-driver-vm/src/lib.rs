@@ -27,9 +27,9 @@ mod layer_applier;
 #[cfg(feature = "compute-driver")]
 pub mod lifecycle;
 #[cfg(feature = "compute-driver")]
-pub mod otel_tracing;
+pub mod local_images;
 #[cfg(feature = "compute-driver")]
-mod podman_socket;
+pub mod otel_tracing;
 #[cfg(feature = "compute-driver")]
 pub mod procguard;
 #[cfg(feature = "compute-driver")]

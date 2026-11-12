@@ -45,6 +45,15 @@ Changes from upstream:
   the exit monitor detached, so the next start relaunches those sandboxes. Then watch
   streams end so the RPC server can exit. Upstream stops serving and leaves the VMs to be
   killed with the process.
+- **Image sources.** A name with a registry host (a first component with a `.` or a `:`,
+  such as `192.168.1.239:5000/app` or `docker.io/library/ubuntu`) always comes from that
+  registry. A name without one (`app:latest`, `localhost/app`) only comes from the local
+  container engine, and is an error if it is missing there; there is no implicit Docker Hub.
+  Upstream looks every name up in Docker or Podman first, so a stale local copy can stand in
+  for a registry image. `OPENSHELL_VM_LOCAL_IMAGE_SOURCE` (`auto`, `docker`, `podman` or
+  `off`) and `OPENSHELL_VM_LOCAL_IMAGE_SOURCE_SOCKET` choose the engine. `DOCKER_HOST`,
+  `OPENSHELL_PODMAN_SOCKET` and `podman info` are no longer consulted. See
+  `src/local_images.rs`.
 - **Removed.** libkrun and its embedded runtime, QEMU, GPU passthrough and `openshell-vfio`,
   virtiofs bind mounts, and the backend negotiation in the lifecycle extension API. A
   sandbox that asks for a GPU or bind mounts is rejected.
