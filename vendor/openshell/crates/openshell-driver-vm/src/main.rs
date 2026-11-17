@@ -158,11 +158,11 @@ struct Args {
     )]
     provider_spiffe_allow_guest_tcp: bool,
 
-    /// vCPUs of a sandbox created without `--cpu`.
+    /// Virtual CPUs of a sandbox created without `--cpu`.
     #[arg(long, env = "OPENSHELL_VM_DRIVER_VCPUS", default_value_t = 2)]
     vcpus: u8,
 
-    /// Most vCPUs a sandbox may request with `--cpu` (at most 32). Unset, a
+    /// Most virtual CPUs a sandbox may request with `--cpu` (at most 32). Unset, a
     /// sandbox may not ask for more than `OPENSHELL_VM_DRIVER_VCPUS`.
     #[arg(long, env = "OPENSHELL_VM_MAX_VCPUS")]
     max_vcpus: Option<u8>,

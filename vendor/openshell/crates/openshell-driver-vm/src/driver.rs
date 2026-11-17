@@ -114,7 +114,7 @@ const DEFAULT_MEM_MIB: u32 = 2048;
 /// Smallest memory a sandbox may request with `memory_limit` (not in
 /// upstream).
 pub const MIN_MEM_MIB: u32 = 256;
-/// Most vCPUs Firecracker gives one microVM.
+/// Most virtual CPUs Firecracker gives one VM.
 pub const MAX_VCPUS: u8 = 32;
 const DEFAULT_OVERLAY_DISK_MIB: u64 = 4096;
 const DEFAULT_REGISTRY_LAYER_DOWNLOAD_CONCURRENCY: usize = 4;
@@ -403,9 +403,9 @@ pub struct VmDriverConfig {
     pub default_image: String,
     pub bootstrap_image: String,
     pub log_level: String,
-    /// vCPUs of a sandbox that sets no `cpu_limit`.
+    /// Virtual CPUs of a sandbox that sets no `cpu_limit`.
     pub vcpus: u8,
-    /// Most vCPUs a sandbox may request with `cpu_limit` (not in upstream).
+    /// Most virtual CPUs a sandbox may request with `cpu_limit` (not in upstream).
     /// Unset, a sandbox may not ask for more than `vcpus`.
     #[serde(default)]
     pub max_vcpus: Option<u8>,
@@ -656,7 +656,7 @@ impl VmDriverConfig {
         self.max_mem_mib.unwrap_or(self.mem_mib)
     }
 
-    /// Most vCPUs a sandbox may request: `max_vcpus`, or `vcpus` when unset.
+    /// Most virtual CPUs a sandbox may request: `max_vcpus`, or `vcpus` when unset.
     pub fn effective_max_vcpus(&self) -> u8 {
         self.max_vcpus.unwrap_or(self.vcpus)
     }
@@ -692,7 +692,7 @@ impl VmDriverConfig {
         Ok(())
     }
 
-    /// The vCPUs of a sandbox with this `cpu_limit` (`sandbox create --cpu`):
+    /// The virtual CPUs of a sandbox with this `cpu_limit` (`sandbox create --cpu`):
     /// the default when it is empty, otherwise the limit if it is a whole
     /// number of CPUs from 1 to [`Self::effective_max_vcpus`].
     pub(crate) fn sandbox_vcpus(&self, cpu_limit: &str) -> Result<u8, String> {
@@ -740,7 +740,7 @@ impl VmDriverConfig {
             })
     }
 
-    /// The vCPUs and memory of a sandbox, from its template's resource limits.
+    /// The virtual CPUs and memory of a sandbox, from its template's resource limits.
     pub(crate) fn sandbox_machine(&self, sandbox: &Sandbox) -> Result<(u8, u32), String> {
         let resources = sandbox
             .spec
