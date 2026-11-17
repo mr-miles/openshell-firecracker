@@ -156,15 +156,6 @@ where
     optional_whole_mib(deserializer, "overlay_disk_mib")
 }
 
-/// Accept `mem_mib` as a whole number of MiB (not in upstream). The VM driver
-/// checks it against its memory limits.
-pub(crate) fn deserialize_optional_mem_mib<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    optional_whole_mib(deserializer, "mem_mib")
-}
-
 /// A whole, non-negative number of MiB in `field`. `driver_config` arrives as
 /// a protobuf `Struct`, whose numbers are all `f64`.
 // The f64 is checked to be a whole number in the exactly representable range

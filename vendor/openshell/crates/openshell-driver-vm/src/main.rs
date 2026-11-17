@@ -158,13 +158,20 @@ struct Args {
     )]
     provider_spiffe_allow_guest_tcp: bool,
 
+    /// Virtual CPUs of a sandbox created without `--cpu`.
     #[arg(long, env = "OPENSHELL_VM_DRIVER_VCPUS", default_value_t = 2)]
     vcpus: u8,
 
+    /// Most virtual CPUs a sandbox may request with `--cpu` (at most 32). Unset, a
+    /// sandbox may not ask for more than `OPENSHELL_VM_DRIVER_VCPUS`.
+    #[arg(long, env = "OPENSHELL_VM_MAX_VCPUS")]
+    max_vcpus: Option<u8>,
+
+    /// Memory, in MiB, of a sandbox created without `--memory`.
     #[arg(long, env = "OPENSHELL_VM_DRIVER_MEM_MIB", default_value_t = 2048)]
     mem_mib: u32,
 
-    /// Most memory a sandbox may request with `driver_config.mem_mib`. Unset, a
+    /// Most memory a sandbox may request with `--memory`. Unset, a
     /// sandbox may not ask for more than `OPENSHELL_VM_DRIVER_MEM_MIB`.
     #[arg(long, env = "OPENSHELL_VM_MAX_MEM_MIB")]
     max_mem_mib: Option<u32>,
@@ -347,6 +354,7 @@ async fn main() -> Result<()> {
         bootstrap_image: args.bootstrap_image.clone(),
         log_level: args.log_level.clone(),
         vcpus: args.vcpus,
+        max_vcpus: args.max_vcpus,
         mem_mib: args.mem_mib,
         max_mem_mib: args.max_mem_mib,
         overlay_disk_mib: args.overlay_disk_mib,
