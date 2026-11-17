@@ -420,10 +420,17 @@ install_config() {
     fi
     if [ -f "$envfile" ] && ! grep -q 'OPENSHELL_VM_MAX_MEM_MIB' "$envfile"; then
         printf '\n%s\n%s\n%s\n' \
-            "# Added by install.sh. Largest driver_config.mem_mib a sandbox may ask for." \
+            "# Added by install.sh. Largest --memory a sandbox may ask for, in MiB." \
             "# Unset: no more than the default memory, OPENSHELL_VM_DRIVER_MEM_MIB (2048)." \
             "# OPENSHELL_VM_MAX_MEM_MIB=8192" >> "$envfile"
         say "added a commented-out OPENSHELL_VM_MAX_MEM_MIB to $envfile"
+    fi
+    if [ -f "$envfile" ] && ! grep -q 'OPENSHELL_VM_MAX_VCPUS' "$envfile"; then
+        printf '\n%s\n%s\n%s\n' \
+            "# Added by install.sh. Largest --cpu a sandbox may ask for, at most 32." \
+            "# Unset: no more than the default vCPUs, OPENSHELL_VM_DRIVER_VCPUS (2)." \
+            "# OPENSHELL_VM_MAX_VCPUS=8" >> "$envfile"
+        say "added a commented-out OPENSHELL_VM_MAX_VCPUS to $envfile"
     fi
 }
 

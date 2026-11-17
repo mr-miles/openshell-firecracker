@@ -111,9 +111,11 @@ const DRIVER_NAME: &str = "openshell-driver-vm";
 const WATCH_BUFFER: usize = 256;
 const DEFAULT_VCPUS: u8 = 2;
 const DEFAULT_MEM_MIB: u32 = 2048;
-/// Smallest memory a sandbox may request with `driver_config.mem_mib` (not in
+/// Smallest memory a sandbox may request with `memory_limit` (not in
 /// upstream).
 pub const MIN_MEM_MIB: u32 = 256;
+/// Most vCPUs Firecracker gives one microVM.
+pub const MAX_VCPUS: u8 = 32;
 const DEFAULT_OVERLAY_DISK_MIB: u64 = 4096;
 const DEFAULT_REGISTRY_LAYER_DOWNLOAD_CONCURRENCY: usize = 4;
 const MAX_REGISTRY_LAYER_DOWNLOAD_CONCURRENCY: usize = 16;
@@ -143,12 +145,10 @@ struct VmSandboxDriverConfig {
         deserialize_with = "crate::sandbox_storage::deserialize_optional_mib"
     )]
     overlay_disk_mib: Option<u64>,
-    /// Memory of this sandbox's VM, in MiB (not in upstream).
-    #[serde(
-        default,
-        deserialize_with = "crate::sandbox_storage::deserialize_optional_mem_mib"
-    )]
-    mem_mib: Option<u64>,
+    /// Replaced by the template's `memory_limit` (`sandbox create --memory`);
+    /// accepted only so a request for it is rejected by name.
+    #[serde(default)]
+    mem_mib: Option<serde_json::Value>,
     /// Files copied from the operator's files root into the guest (not in
     /// upstream).
     #[serde(default)]
@@ -173,9 +173,62 @@ impl VmSandboxDriverConfig {
             return Ok(Self::default());
         };
 
-        serde_json::from_value(struct_to_json_value(config))
-            .map_err(|err| format!("invalid vm driver_config: {err}"))
+        let config: Self = serde_json::from_value(struct_to_json_value(config))
+            .map_err(|err| format!("invalid vm driver_config: {err}"))?;
+        if config.mem_mib.is_some() {
+            return Err("driver_config.mem_mib is no longer supported: \
+                 set the memory with sandbox create --memory"
+                .to_string());
+        }
+        Ok(config)
     }
+}
+
+/// A non-negative decimal such as `2`, `0.5` or `.5`, exactly, as
+/// `numerator / denominator` with the denominator a power of ten.
+fn parse_decimal(value: &str) -> Option<(u128, u128)> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    let digits = format!("{whole}{fraction}");
+    if digits.is_empty() || digits.len() > 30 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let denominator = 10_u128.checked_pow(u32::try_from(fraction.len()).ok()?)?;
+    Some((digits.parse().ok()?, denominator))
+}
+
+/// A positive Kubernetes CPU quantity (`2`, `1.5`, `1500m`) as a number of
+/// CPUs, `numerator / denominator`.
+fn parse_cpu_quantity(value: &str) -> Option<(u128, u128)> {
+    let (numerator, denominator) = match value.strip_suffix('m') {
+        Some(millicores) => (millicores.parse().ok()?, 1000),
+        None => parse_decimal(value)?,
+    };
+    (numerator > 0).then_some((numerator, denominator))
+}
+
+/// A Kubernetes memory quantity (`4Gi`, `4096Mi`, `4G`, bytes) in whole MiB,
+/// rounded down.
+fn parse_memory_mib(value: &str) -> Option<u128> {
+    let split = value
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(value.len());
+    let (number, suffix) = value.split_at(split);
+    let multiplier: u128 = match suffix {
+        "" => 1,
+        "k" | "K" => 1000,
+        "M" => 1000_u128.pow(2),
+        "G" => 1000_u128.pow(3),
+        "T" => 1000_u128.pow(4),
+        "P" => 1000_u128.pow(5),
+        "Ki" => 1 << 10,
+        "Mi" => 1 << 20,
+        "Gi" => 1 << 30,
+        "Ti" => 1 << 40,
+        "Pi" => 1 << 50,
+        _ => return None,
+    };
+    let (numerator, denominator) = parse_decimal(number)?;
+    Some(numerator.checked_mul(multiplier)? / denominator / (1 << 20))
 }
 
 const OPENSHELL_HOST_GATEWAY_ALIAS: &str = "host.openshell.internal";
@@ -350,9 +403,15 @@ pub struct VmDriverConfig {
     pub default_image: String,
     pub bootstrap_image: String,
     pub log_level: String,
+    /// vCPUs of a sandbox that sets no `cpu_limit`.
     pub vcpus: u8,
+    /// Most vCPUs a sandbox may request with `cpu_limit` (not in upstream).
+    /// Unset, a sandbox may not ask for more than `vcpus`.
+    #[serde(default)]
+    pub max_vcpus: Option<u8>,
+    /// Memory, in MiB, of a sandbox that sets no `memory_limit`.
     pub mem_mib: u32,
-    /// Most memory a sandbox may request with `driver_config.mem_mib` (not in
+    /// Most memory a sandbox may request with `memory_limit` (not in
     /// upstream). Unset, a sandbox may not ask for more than `mem_mib`.
     #[serde(default)]
     pub max_mem_mib: Option<u32>,
@@ -449,6 +508,7 @@ impl std::fmt::Debug for VmDriverConfig {
             .field("bootstrap_image", &self.bootstrap_image)
             .field("log_level", &self.log_level)
             .field("vcpus", &self.vcpus)
+            .field("max_vcpus", &self.max_vcpus)
             .field("mem_mib", &self.mem_mib)
             .field("max_mem_mib", &self.max_mem_mib)
             .field("overlay_disk_mib", &self.overlay_disk_mib)
@@ -530,6 +590,7 @@ impl Default for VmDriverConfig {
             bootstrap_image: String::new(),
             log_level: "info".to_string(),
             vcpus: DEFAULT_VCPUS,
+            max_vcpus: None,
             mem_mib: DEFAULT_MEM_MIB,
             max_mem_mib: None,
             overlay_disk_mib: DEFAULT_OVERLAY_DISK_MIB,
@@ -595,7 +656,31 @@ impl VmDriverConfig {
         self.max_mem_mib.unwrap_or(self.mem_mib)
     }
 
-    pub fn validate_memory_config(&self) -> Result<(), String> {
+    /// Most vCPUs a sandbox may request: `max_vcpus`, or `vcpus` when unset.
+    pub fn effective_max_vcpus(&self) -> u8 {
+        self.max_vcpus.unwrap_or(self.vcpus)
+    }
+
+    pub fn validate_machine_config(&self) -> Result<(), String> {
+        if !(1..=MAX_VCPUS).contains(&self.vcpus) {
+            return Err(format!(
+                "vcpus {} is outside Firecracker's range 1 to {MAX_VCPUS}",
+                self.vcpus
+            ));
+        }
+        if let Some(max) = self.max_vcpus {
+            if max < self.vcpus {
+                return Err(format!(
+                    "max_vcpus {max} is smaller than the default vcpus {}",
+                    self.vcpus
+                ));
+            }
+            if max > MAX_VCPUS {
+                return Err(format!(
+                    "max_vcpus {max} is more than Firecracker's {MAX_VCPUS}"
+                ));
+            }
+        }
         if let Some(max) = self.max_mem_mib
             && max < self.mem_mib
         {
@@ -607,20 +692,71 @@ impl VmDriverConfig {
         Ok(())
     }
 
-    /// The memory, in MiB, of a sandbox whose `driver_config` asked for
-    /// `requested`: the default without a request, otherwise the request if it
-    /// is within [`MIN_MEM_MIB`] and [`Self::effective_max_mem_mib`].
-    pub(crate) fn sandbox_mem_mib(&self, requested: Option<u64>) -> Result<u32, String> {
-        let Some(mib) = requested else {
+    /// The vCPUs of a sandbox with this `cpu_limit` (`sandbox create --cpu`):
+    /// the default when it is empty, otherwise the limit if it is a whole
+    /// number of CPUs from 1 to [`Self::effective_max_vcpus`].
+    pub(crate) fn sandbox_vcpus(&self, cpu_limit: &str) -> Result<u8, String> {
+        let limit = cpu_limit.trim();
+        if limit.is_empty() {
+            return Ok(self.vcpus);
+        }
+        let max = self.effective_max_vcpus();
+        let (num, den) = parse_cpu_quantity(limit).ok_or_else(|| {
+            format!("invalid cpu_limit '{limit}': expected a number of CPUs, such as 2 or 2000m")
+        })?;
+        if !num.is_multiple_of(den) {
+            return Err(format!(
+                "cpu_limit {limit} is not a whole number of CPUs: a Firecracker VM has whole vCPUs"
+            ));
+        }
+        u8::try_from(num / den)
+            .ok()
+            .filter(|vcpus| (1..=max).contains(vcpus))
+            .ok_or_else(|| {
+                format!("cpu_limit {limit} is outside the allowed range 1 to {max} vCPUs")
+            })
+    }
+
+    /// The memory, in MiB, of a sandbox with this `memory_limit` (`sandbox
+    /// create --memory`): the default when it is empty, otherwise the limit,
+    /// rounded down to whole MiB, if it is from [`MIN_MEM_MIB`] to
+    /// [`Self::effective_max_mem_mib`].
+    pub(crate) fn sandbox_mem_mib(&self, memory_limit: &str) -> Result<u32, String> {
+        let limit = memory_limit.trim();
+        if limit.is_empty() {
             return Ok(self.mem_mib);
-        };
+        }
         let max = self.effective_max_mem_mib();
+        let mib = parse_memory_mib(limit).ok_or_else(|| {
+            format!("invalid memory_limit '{limit}': expected a quantity such as 4Gi or 4096Mi")
+        })?;
         u32::try_from(mib)
             .ok()
             .filter(|mib| (MIN_MEM_MIB..=max).contains(mib))
             .ok_or_else(|| {
-                format!("mem_mib {mib} is outside the allowed range {MIN_MEM_MIB} to {max} MiB")
+                format!(
+                    "memory_limit {limit} ({mib} MiB) is outside the allowed range {MIN_MEM_MIB} to {max} MiB"
+                )
             })
+    }
+
+    /// The vCPUs and memory of a sandbox, from its template's resource limits.
+    pub(crate) fn sandbox_machine(&self, sandbox: &Sandbox) -> Result<(u8, u32), String> {
+        let resources = sandbox
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.template.as_ref())
+            .and_then(|template| template.resources.as_ref());
+        let (cpu_limit, memory_limit) = resources.map_or(("", ""), |resources| {
+            (
+                resources.cpu_limit.as_str(),
+                resources.memory_limit.as_str(),
+            )
+        });
+        Ok((
+            self.sandbox_vcpus(cpu_limit)?,
+            self.sandbox_mem_mib(memory_limit)?,
+        ))
     }
 
     pub fn validate_bootstrap_image_config(&self) -> Result<(), String> {
@@ -1293,8 +1429,8 @@ impl VmDriver {
             .validate(config.overlay_disk_mib)
             .map_err(|err| format!("invalid sandbox storage configuration: {err}"))?;
         config
-            .validate_memory_config()
-            .map_err(|err| format!("invalid VM memory configuration: {err}"))?;
+            .validate_machine_config()
+            .map_err(|err| format!("invalid VM vCPU or memory configuration: {err}"))?;
         if let Some(raw) = config.default_workdir.as_deref() {
             config.default_workdir = Some(
                 validate_default_working_dir(raw)
@@ -1750,10 +1886,10 @@ impl VmDriver {
             driver_reports_runtime_readiness: false,
             resource_capabilities: Some(ResourceCapabilities {
                 cpu: Some(CpuResourceCapabilities {
-                    limit_supported: false,
+                    limit_supported: true,
                 }),
                 memory: Some(MemoryResourceCapabilities {
-                    limit_supported: false,
+                    limit_supported: true,
                 }),
                 gpu: None,
             }),
@@ -1790,7 +1926,7 @@ impl VmDriver {
         )
         .map_err(Status::invalid_argument)?;
         self.config
-            .sandbox_mem_mib(driver_config.mem_mib)
+            .sandbox_machine(sandbox)
             .map_err(Status::invalid_argument)?;
         // Resolve sources now, so a request naming a missing file or one
         // outside the files root fails at create, not during provisioning.
@@ -2023,10 +2159,10 @@ impl VmDriver {
         let driver_config =
             VmSandboxDriverConfig::from_sandbox(&sandbox).map_err(Status::invalid_argument)?;
         // Checked again at every launch: the operator may have lowered the
-        // limit since the sandbox was created.
-        let mem_mib = self
+        // limits since the sandbox was created.
+        let (vcpus, mem_mib) = self
             .config
-            .sandbox_mem_mib(driver_config.mem_mib)
+            .sandbox_machine(&sandbox)
             .map_err(Status::failed_precondition)?;
         let driver_config_had_rootfs_tar = driver_config.rootfs_tar_path.is_some();
         let rootfs_tar_path = match driver_config.rootfs_tar_path {
@@ -2161,7 +2297,7 @@ impl VmDriver {
         }
 
         let mut plan = LaunchPlan {
-            vcpus: self.config.vcpus,
+            vcpus,
             mem_mib,
             kernel_profile: None,
             guest_init_dropins: Vec::new(),
@@ -9854,88 +9990,182 @@ mod tests {
         }
     }
 
+    fn sandbox_with_limits(cpu_limit: &str, memory_limit: &str) -> Sandbox {
+        use openshell_core::proto::compute::v1::DriverResourceRequirements;
+
+        Sandbox {
+            id: "sandbox-123".to_string(),
+            spec: Some(SandboxSpec {
+                template: Some(SandboxTemplate {
+                    image: "example/image:latest".to_string(),
+                    resources: Some(DriverResourceRequirements {
+                        cpu_limit: cpu_limit.to_string(),
+                        memory_limit: memory_limit.to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn driver_config_carries_the_requested_memory() {
+    fn driver_config_mem_mib_points_at_memory_limit() {
         let sandbox = sandbox_with_driver_config(serde_json::json!({"mem_mib": 4096}));
-        let config = VmSandboxDriverConfig::from_sandbox(&sandbox).unwrap();
-        assert_eq!(config.mem_mib, Some(4096));
+        let err = VmSandboxDriverConfig::from_sandbox(&sandbox).unwrap_err();
+        assert!(err.contains("--memory"), "{err}");
+    }
 
-        let none = sandbox_with_driver_config(serde_json::json!({}));
-        assert_eq!(
-            VmSandboxDriverConfig::from_sandbox(&none).unwrap().mem_mib,
-            None
-        );
+    #[test]
+    fn cpu_limit_quantities_become_whole_vcpus() {
+        let config = VmDriverConfig {
+            vcpus: 2,
+            max_vcpus: Some(8),
+            ..Default::default()
+        };
+        assert_eq!(config.sandbox_vcpus(""), Ok(2), "the default");
+        for (limit, vcpus) in [("1", 1), ("4", 4), (" 8 ", 8), ("4000m", 4), ("3.0", 3)] {
+            assert_eq!(config.sandbox_vcpus(limit), Ok(vcpus), "{limit}");
+        }
+        for limit in ["1.5", "1500m", "0.5"] {
+            let err = config.sandbox_vcpus(limit).unwrap_err();
+            assert!(err.contains("whole number"), "{limit}: {err}");
+        }
+        for limit in ["0", "0m", "-1", "two", "2x", "m", "."] {
+            assert!(config.sandbox_vcpus(limit).is_err(), "{limit}");
+        }
+        let err = config.sandbox_vcpus("9").unwrap_err();
+        assert!(err.contains("1 to 8"), "{err}");
+    }
 
-        for bad in [
-            serde_json::json!(1.5),
-            serde_json::json!(-1),
-            serde_json::json!("4096"),
+    #[test]
+    fn cpu_limit_is_capped_by_the_default_without_max_vcpus() {
+        let config = VmDriverConfig {
+            vcpus: 2,
+            ..Default::default()
+        };
+        assert_eq!(config.sandbox_vcpus("2"), Ok(2));
+        assert_eq!(config.sandbox_vcpus("1"), Ok(1), "less is allowed");
+        let err = config.sandbox_vcpus("3").unwrap_err();
+        assert!(err.contains("1 to 2"), "{err}");
+    }
+
+    #[test]
+    fn memory_limit_quantities_become_mib() {
+        let config = VmDriverConfig {
+            mem_mib: 2048,
+            max_mem_mib: Some(16384),
+            ..Default::default()
+        };
+        assert_eq!(config.sandbox_mem_mib(""), Ok(2048), "the default");
+        for (limit, mib) in [
+            ("4Gi", 4096),
+            ("4096Mi", 4096),
+            ("0.5Gi", 512),
+            ("1048576Ki", 1024),
+            ("4G", 3814),
+            ("1073741824", 1024),
+            ("16Gi", 16384),
+            (" 256Mi ", MIN_MEM_MIB),
         ] {
-            let sandbox = sandbox_with_driver_config(serde_json::json!({"mem_mib": bad}));
-            let err = VmSandboxDriverConfig::from_sandbox(&sandbox).unwrap_err();
-            assert!(err.contains("mem_mib"), "{err}");
+            assert_eq!(config.sandbox_mem_mib(limit), Ok(mib), "{limit}");
         }
+        for limit in [
+            "16385Mi", "255Mi", "0", "1Ei", "4gi", "4 Gi", "Gi", "-1Gi", "1e9",
+        ] {
+            assert!(config.sandbox_mem_mib(limit).is_err(), "{limit}");
+        }
+        let err = config.sandbox_mem_mib("32Gi").unwrap_err();
+        assert!(err.contains("256 to 16384"), "{err}");
     }
 
     #[test]
-    fn sandbox_memory_defaults_and_is_capped_by_max_mem_mib() {
-        let mut config = VmDriverConfig {
+    fn memory_limit_is_capped_by_the_default_without_max_mem_mib() {
+        let config = VmDriverConfig {
             mem_mib: 2048,
             ..Default::default()
         };
-        assert_eq!(config.sandbox_mem_mib(None), Ok(2048), "the default");
-        assert_eq!(
-            config.sandbox_mem_mib(Some(1024)),
-            Ok(1024),
-            "less is allowed"
-        );
-        assert_eq!(
-            config.sandbox_mem_mib(Some(u64::from(MIN_MEM_MIB))),
-            Ok(MIN_MEM_MIB)
-        );
-        // Without max_mem_mib, a sandbox cannot ask for more than the default.
-        let err = config.sandbox_mem_mib(Some(2049)).unwrap_err();
+        assert_eq!(config.sandbox_mem_mib("1Gi"), Ok(1024), "less is allowed");
+        let err = config.sandbox_mem_mib("2049Mi").unwrap_err();
         assert!(err.contains("256 to 2048"), "{err}");
-
-        config.max_mem_mib = Some(8192);
-        assert_eq!(config.sandbox_mem_mib(Some(8192)), Ok(8192));
-        assert_eq!(config.sandbox_mem_mib(None), Ok(2048), "still the default");
-        for mib in [8193, u64::from(MIN_MEM_MIB) - 1, 0, u64::from(u32::MAX) + 1] {
-            assert!(config.sandbox_mem_mib(Some(mib)).is_err(), "{mib}");
-        }
     }
 
     #[test]
-    fn max_mem_mib_may_not_be_below_the_default() {
+    fn sandbox_machine_reads_the_template_limits() {
+        let config = VmDriverConfig {
+            vcpus: 2,
+            max_vcpus: Some(8),
+            mem_mib: 2048,
+            max_mem_mib: Some(8192),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.sandbox_machine(&sandbox_with_limits("4", "8Gi")),
+            Ok((4, 8192))
+        );
+        assert_eq!(
+            config.sandbox_machine(&sandbox_with_limits("", "")),
+            Ok((2, 2048)),
+            "empty limits are the defaults"
+        );
+        let unset = sandbox_with_driver_config(serde_json::json!({}));
+        assert_eq!(
+            config.sandbox_machine(&unset),
+            Ok((2, 2048)),
+            "no resources"
+        );
+    }
+
+    #[test]
+    fn machine_config_bounds_the_defaults_and_maximums() {
         let mut config = VmDriverConfig {
+            vcpus: 2,
             mem_mib: 2048,
             ..Default::default()
         };
-        config.validate_memory_config().expect("unset");
+        config.validate_machine_config().expect("defaults");
+        config.max_vcpus = Some(2);
         config.max_mem_mib = Some(2048);
-        config.validate_memory_config().expect("equal");
+        config.validate_machine_config().expect("equal");
+
+        config.max_vcpus = Some(1);
+        let err = config.validate_machine_config().unwrap_err();
+        assert!(err.contains("max_vcpus 1"), "{err}");
+        config.max_vcpus = Some(MAX_VCPUS + 1);
+        let err = config.validate_machine_config().unwrap_err();
+        assert!(err.contains("Firecracker"), "{err}");
+        config.max_vcpus = None;
+
+        for vcpus in [0, MAX_VCPUS + 1] {
+            config.vcpus = vcpus;
+            assert!(config.validate_machine_config().is_err(), "{vcpus} vCPUs");
+        }
+        config.vcpus = 2;
+
         config.max_mem_mib = Some(2047);
-        let err = config.validate_memory_config().unwrap_err();
+        let err = config.validate_machine_config().unwrap_err();
         assert!(err.contains("max_mem_mib 2047"), "{err}");
     }
 
     #[test]
-    fn validate_sandbox_bounds_the_requested_memory() {
+    fn validate_sandbox_bounds_the_requested_limits() {
         let mut driver = test_driver_with_extensions(LifecycleExtensionRegistry::new());
-        driver.config.allow_driver_config = true;
+        driver.config.max_vcpus = Some(4);
         driver.config.max_mem_mib = Some(8192);
 
-        let within = sandbox_with_driver_config(serde_json::json!({"mem_mib": 8192}));
         driver
-            .validate_sandbox(&within)
-            .expect("memory within the limit");
+            .validate_sandbox(&sandbox_with_limits("4", "8Gi"))
+            .expect("limits within the maximums");
 
-        let over = sandbox_with_driver_config(serde_json::json!({"mem_mib": 8193}));
-        let err = driver
-            .validate_sandbox(&over)
-            .expect_err("memory over the limit");
-        assert_eq!(err.code(), Code::InvalidArgument);
-        assert!(err.message().contains("mem_mib"), "{}", err.message());
+        for (cpu, memory, field) in [("5", "8Gi", "cpu_limit"), ("4", "8193Mi", "memory_limit")] {
+            let err = driver
+                .validate_sandbox(&sandbox_with_limits(cpu, memory))
+                .expect_err("over a maximum");
+            assert_eq!(err.code(), Code::InvalidArgument);
+            assert!(err.message().contains(field), "{}", err.message());
+        }
     }
 
     #[test]
@@ -10092,7 +10322,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_vm_sandbox_accepts_template_resources_as_noop() {
+    fn validate_vm_sandbox_accepts_template_resources() {
         use openshell_core::proto::compute::v1::DriverResourceRequirements;
 
         let sandbox = Sandbox {
@@ -10110,7 +10340,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        validate_vm_sandbox(&sandbox).expect("template.resources should be accepted and ignored");
+        validate_vm_sandbox(&sandbox).expect("template.resources should be accepted");
     }
 
     #[test]
@@ -14371,11 +14601,11 @@ while :; do sleep 0.05; done"#,
     }
 
     #[test]
-    fn capabilities_report_static_resource_support() {
+    fn capabilities_report_cpu_and_memory_limits() {
         let driver = test_driver_with_extensions(LifecycleExtensionRegistry::new());
         let resources = driver.capabilities().resource_capabilities.unwrap();
-        assert!(!resources.cpu.unwrap().limit_supported);
-        assert!(!resources.memory.unwrap().limit_supported);
+        assert!(resources.cpu.unwrap().limit_supported);
+        assert!(resources.memory.unwrap().limit_supported);
         assert!(resources.gpu.is_none());
     }
 

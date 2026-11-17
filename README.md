@@ -12,8 +12,8 @@ driver: libkrun, QEMU, GPU passthrough and virtiofs bind mounts are not part of 
 
 It also differs from OpenShell's driver in three behaviors: a sandbox starts the way a
 container does, with the image's `ENV` and in the image's `WORKDIR`
-([Image ENV and WORKDIR](#image-env-and-workdir)); a sandbox can set its memory and disk size
-and have files copied in from the host ([Per-sandbox memory, disk size and files](#per-sandbox-memory-disk-size-and-files));
+([Image ENV and WORKDIR](#image-env-and-workdir)); a sandbox can set its vCPUs, memory and disk size
+and have files copied in from the host ([Per-sandbox CPU, memory, disk size and files](#per-sandbox-cpu-memory-disk-size-and-files));
 and, if enabled, the driver issues SPIFFE JWT-SVIDs to its host supervisors itself, without
 a SPIRE agent ([Supervisor identity](#supervisor-identity)).
 
@@ -435,9 +435,10 @@ The driver's `OPENSHELL_VM_DEFAULT_WORKDIR` (default `/sandbox`) sets the workin
 sandboxes whose image has none ([Image ENV and WORKDIR](#image-env-and-workdir)).
 The driver's `OPENSHELL_VM_SUPERVISOR_IDENTITY*` options (optional, off by default) are in
 [Supervisor identity](#supervisor-identity).
-The driver's `OPENSHELL_VM_MAX_MEM_MIB`, `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`,
-`OPENSHELL_VM_FILES_ROOT` and `OPENSHELL_VM_FILES_MAX_BYTES` limit what a sandbox can request in its `driver_config`; see
-[Per-sandbox memory, disk size and files](#per-sandbox-memory-disk-size-and-files).
+The driver's `OPENSHELL_VM_MAX_VCPUS` and `OPENSHELL_VM_MAX_MEM_MIB` limit what a sandbox can request
+with `--cpu` and `--memory`, and `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`, `OPENSHELL_VM_FILES_ROOT` and
+`OPENSHELL_VM_FILES_MAX_BYTES` what it can request in its `driver_config`; see
+[Per-sandbox CPU, memory, disk size and files](#per-sandbox-cpu-memory-disk-size-and-files).
 The driver's `OPENSHELL_VM_IMAGE_CACHE_MAX_IDLE_HOURS` (default 48, 0 to keep everything)
 sets when unused image disks are removed; see [Image cache cleanup](#image-cache-cleanup).
 The driver's `OPENSHELL_VM_LOCAL_IMAGE_SOURCE` (default `auto`) and
@@ -463,16 +464,40 @@ guest gets compressed swap in its own memory (zram), half its memory by default
 
 zram stretches memory; it does not add any. To give VMs more, raise the driver's default,
 `OPENSHELL_VM_DRIVER_MEM_MIB` (`2048`), or let a sandbox ask for more with
-`driver_config.mem_mib` ([Per-sandbox memory, disk size and files](#per-sandbox-memory-disk-size-and-files)).
+`--memory` ([Per-sandbox CPU, memory, disk size and files](#per-sandbox-cpu-memory-disk-size-and-files)).
 
 It needs the guest kernel from this release or later, and `mkswap` and `swapon` in the
 bootstrap image. Without either, the guest boots without swap. `rootfs-console.log`
 says which happened: `openshell-firecracker: zram swap on (1024 MiB)`, or why it is off.
 
-## Per-sandbox memory, disk size and files
+## Per-sandbox CPU, memory, disk size and files
 
-A sandbox can set its memory and the size of its writable disk, and have files copied in
-from the host, through its `driver_config`. None of these is in upstream OpenShell.
+A sandbox sets its vCPUs and memory with the standard `--cpu` and `--memory` options of
+`openshell sandbox create`. It can also set the size of its writable disk, and have files
+copied in from the host, through its `driver_config`. Upstream's VM driver ignores
+`--cpu` and `--memory`, and has none of the `driver_config` settings.
+
+### CPU and memory
+
+```shell
+openshell sandbox create --cpu 4 --memory 8Gi ...
+```
+
+**`--cpu`** is the VM's vCPU count. A Firecracker VM has whole vCPUs, so the value must be
+a whole number of CPUs (`4`, or `4000m`); `1.5` is refused rather than rounded. Without
+it, a VM gets `OPENSHELL_VM_DRIVER_VCPUS` (2). A request must be between 1 and
+`OPENSHELL_VM_MAX_VCPUS`, which defaults to the default vCPUs: set it, up to Firecracker's
+32, to let sandboxes ask for more.
+
+**`--memory`** is the VM's memory, as a Kubernetes quantity (`8Gi`, `8192Mi`, `8G`),
+rounded down to whole MiB. Without it, a VM gets `OPENSHELL_VM_DRIVER_MEM_MIB` (2048). A
+request must be between 256 MiB and `OPENSHELL_VM_MAX_MEM_MIB`, which defaults to the
+default memory: set it to let sandboxes ask for more. Unlike the disk, the memory is real
+host RAM once the guest touches it.
+
+Neither needs `allow_driver_config`: anyone who can create a sandbox can ask for up to
+the two maximums. Stop and start keep the requests, and a start fails if one is outside
+the limits in force, for instance after a maximum was lowered.
 
 ### Enable driver_config
 
@@ -511,7 +536,6 @@ drops the rest:
 
 ```shell
 openshell sandbox create --driver-config-json '{"firecracker": {
-  "mem_mib": 4096,
   "overlay_disk_mib": 16384,
   "files": [
     {"source": "app/app.toml", "target": "/etc/app/app.toml", "mode": "0640"},
@@ -520,11 +544,8 @@ openshell sandbox create --driver-config-json '{"firecracker": {
   ]}}' ...
 ```
 
-**`mem_mib`** is the VM's memory. The default is `OPENSHELL_VM_DRIVER_MEM_MIB` (2048). A
-request must be between 256 and `OPENSHELL_VM_MAX_MEM_MIB`, which defaults to the default
-memory: set it to let sandboxes ask for more. Unlike the disk, the memory is real host RAM
-once the guest touches it. Stop and start keep the request; a start fails if it is outside
-the limits in force, for instance after the maximum was lowered.
+The memory is not a `driver_config` setting: a `mem_mib` there is refused, with a pointer
+to `--memory` ([CPU and memory](#cpu-and-memory)).
 
 **`overlay_disk_mib`** is the size of the sandbox's writable overlay disk, which holds
 everything the workload writes. The default is `OPENSHELL_VM_OVERLAY_DISK_MIB` (4096). A
@@ -715,7 +736,7 @@ Limits:
 
 - No virtiofs bind mounts and no GPU passthrough on Firecracker. A sandbox that asks for
   either is rejected at validation, not ignored. To get host files into a guest, use
-  [`driver_config.files`](#per-sandbox-memory-disk-size-and-files), which copies them in.
+  [`driver_config.files`](#per-sandbox-cpu-memory-disk-size-and-files), which copies them in.
 - `[openshell.supervisor.network].additional_ca_bundle` and the shared supervisor pool
   are rejected by the gateway for any external driver.
 - Rootfs tar uploads need the driver and gateway on the same filesystem and UID.
@@ -737,9 +758,12 @@ Limits:
 - The guest environment file sits in the sandbox's own overlay (mode `0600`, root-owned).
   It holds what the driver passes to the guest init.
 - Firecracker's `jailer` is not used.
+- Anyone who can create a sandbox can ask for vCPUs up to `OPENSHELL_VM_MAX_VCPUS` and
+  memory up to `OPENSHELL_VM_MAX_MEM_MIB`, with or without `allow_driver_config`; keep
+  the memory maximum within what the host can give every sandbox at once.
 - With `allow_driver_config` on, anyone who can create a sandbox can read every file under
-  `OPENSHELL_VM_FILES_ROOT` by copying it into their sandbox, can ask for memory up to
-  `OPENSHELL_VM_MAX_MEM_MIB` and a disk up to `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`. Put only what all sandbox users may see in the files
+  `OPENSHELL_VM_FILES_ROOT` by copying it into their sandbox, and can ask for a disk up to
+  `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`. Put only what all sandbox users may see in the files
   root, and keep the maximum within the host's free space: overlays are sparse, so the host
   disk fills only as guests write, but it can fill.
 
