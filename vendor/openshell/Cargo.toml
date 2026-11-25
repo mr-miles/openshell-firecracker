@@ -17,12 +17,13 @@ repository = "https://github.com/NVIDIA/OpenShell"
 # The rest of OpenShell, from the revision driver/UPSTREAM.env names (keep the two in sync:
 # `mise run driver:check-pin` checks). The host supervisor and guest binaries the driver
 # embeds are built from that revision too.
-openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "ce58cf8e9b953281352d98a637e41616295b1318", default-features = false }
-openshell-isolation-interface = { git = "https://github.com/NVIDIA/OpenShell", rev = "ce58cf8e9b953281352d98a637e41616295b1318" }
-openshell-sandbox-backend = { git = "https://github.com/NVIDIA/OpenShell", rev = "ce58cf8e9b953281352d98a637e41616295b1318" }
-openshell-otel = { git = "https://github.com/NVIDIA/OpenShell", rev = "ce58cf8e9b953281352d98a637e41616295b1318" }
-openshell-otel-test-support = { git = "https://github.com/NVIDIA/OpenShell", rev = "ce58cf8e9b953281352d98a637e41616295b1318" }
-openshell-crypto = { git = "https://github.com/NVIDIA/OpenShell", rev = "ce58cf8e9b953281352d98a637e41616295b1318", default-features = false, features = ["aws-lc"] }
+openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "f16795bc76b13fcc35d8b0d2b49cfc788c701ef9", default-features = false }
+openshell-isolation-interface = { git = "https://github.com/NVIDIA/OpenShell", rev = "f16795bc76b13fcc35d8b0d2b49cfc788c701ef9" }
+openshell-sandbox-backend = { git = "https://github.com/NVIDIA/OpenShell", rev = "f16795bc76b13fcc35d8b0d2b49cfc788c701ef9" }
+openshell-otel = { git = "https://github.com/NVIDIA/OpenShell", rev = "f16795bc76b13fcc35d8b0d2b49cfc788c701ef9" }
+openshell-otel-test-support = { git = "https://github.com/NVIDIA/OpenShell", rev = "f16795bc76b13fcc35d8b0d2b49cfc788c701ef9" }
+openshell-spiffe = { git = "https://github.com/NVIDIA/OpenShell", rev = "f16795bc76b13fcc35d8b0d2b49cfc788c701ef9" }
+openshell-crypto = { git = "https://github.com/NVIDIA/OpenShell", rev = "f16795bc76b13fcc35d8b0d2b49cfc788c701ef9", default-features = false, features = ["aws-lc"] }
 # Async runtime
 tokio = { version = "1.53.3", features = ["full"] }
 

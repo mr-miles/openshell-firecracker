@@ -122,6 +122,7 @@ tonic-build = { version = "0.14", optional = true }
 [dev-dependencies]
 spiffe = { workspace = true }
 openshell-otel-test-support = { workspace = true }
+openshell-spiffe = { workspace = true }
 temp-env = "0.3"
 tempfile = "3"
 rcgen = { workspace = true }

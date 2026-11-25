@@ -216,7 +216,7 @@ async fn workload_api_child() {
     let Some(socket) = std::env::var_os(CHILD_SOCKET_ENV) else {
         return;
     };
-    let endpoint = openshell_core::spiffe::workload_api_endpoint(Path::new(&socket));
+    let endpoint = openshell_spiffe::workload_api_endpoint(Path::new(&socket));
     let client = spiffe::WorkloadApiClient::connect_to(&endpoint)
         .await
         .expect("connect");
@@ -305,11 +305,10 @@ async fn other_processes_are_refused() {
         .unwrap();
 
     // This test process is not it.
-    let client = spiffe::WorkloadApiClient::connect_to(
-        openshell_core::spiffe::workload_api_endpoint(&socket),
-    )
-    .await
-    .unwrap();
+    let client =
+        spiffe::WorkloadApiClient::connect_to(openshell_spiffe::workload_api_endpoint(&socket))
+            .await
+            .unwrap();
     let error = client.fetch_jwt_token([AUDIENCE], None).await.unwrap_err();
     assert!(
         matches!(error, spiffe::WorkloadApiError::PermissionDenied(_))
